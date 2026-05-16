@@ -117,6 +117,7 @@ protected:
     
     // Cleanup helpers
     void CleanupMixerResources();
+    void ShutdownAudio(CKBOOL releaseObjectSounds);
     void StopAllPlayingSounds();
 
     // Audio format conversion helpers

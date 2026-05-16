@@ -310,7 +310,7 @@ SdlSoundManager::SdlSoundManager(CKContext *Context)
 
 SdlSoundManager::~SdlSoundManager()
 {
-    OnCKEnd();
+    ShutdownAudio(FALSE);
     
     if (m_Mutex) {
         SDL_DestroyMutex(m_Mutex);
@@ -1107,16 +1107,23 @@ CKERROR SdlSoundManager::OnCKEnd()
         return CK_OK;
     }
 
+    ShutdownAudio(TRUE);
+    return CK_OK;
+}
+
+void SdlSoundManager::ShutdownAudio(CKBOOL releaseObjectSounds)
+{
     LockMutex();
     
-    // Stop all sounds and clean up
-    StopAllPlayingSounds();
+    if (releaseObjectSounds) {
+        StopAllPlayingSounds();
+    }
+    ReleaseMinions();
     CleanupMixerResources();
     
     m_bInitialized = FALSE;
     
     UnlockMutex();
-    return CK_OK;
 }
 
 void SdlSoundManager::CleanupMixerResources()
