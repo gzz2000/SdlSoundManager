@@ -1,0 +1,1379 @@
+#include "SdlSoundManager.h"
+
+#include <math.h>
+#include <string.h>
+
+#ifdef LoadImage
+#undef LoadImage
+#endif
+
+#ifdef GetClassName
+#undef GetClassName
+#endif
+
+#define SDL_SOUNDMANAGER_GUID SOUND_MANAGER_GUID
+
+// Helper macro for min/max
+#ifndef min
+#define min(a,b) (((a) < (b)) ? (a) : (b))
+#endif
+
+#ifndef max
+#define max(a,b) (((a) > (b)) ? (a) : (b))
+#endif
+
+//-----------------------------------------------------------------------------
+// Plugin Entry Points
+//-----------------------------------------------------------------------------
+
+#ifdef CK_LIB
+    #define CreateNewManager               CreateNewSoundManager
+    #define RemoveManager                  RemoveSoundManager
+    #define CKGetPluginInfoCount           CKGet_SoundManager_PluginInfoCount
+    #define CKGetPluginInfo                CKGet_SoundManager_PluginInfo
+    #define g_PluginInfo                   g_SoundManager_PluginInfo
+#endif
+
+// Plugin export info
+static CKPluginInfo g_PluginInfo;
+static char *SdlSoundManagerName = "SDL Sound Manager";
+
+CKERROR CreateSdlSoundManager(CKContext *context)
+{
+    if (!context) return CKERR_INVALIDPARAMETER;
+    
+    SdlSoundManager* manager = new SdlSoundManager(context);
+    if (!manager) return CKERR_OUTOFMEMORY;
+    
+    return CK_OK;
+}
+
+CKERROR CreateNewManager(CKContext *context)
+{
+    if (!context) return CKERR_INVALIDPARAMETER;
+    return CreateSdlSoundManager(context);
+}
+
+CKERROR RemoveManager(CKContext *context)
+{
+    SdlSoundManager *manager;
+    
+    if (!context) return CKERR_INVALIDPARAMETER;
+    
+    manager = (SdlSoundManager*)context->GetManagerByName(SdlSoundManagerName);
+    if (manager) {
+        delete manager;
+    }
+    return CK_OK;
+}
+
+PLUGIN_EXPORT CKPluginInfo *CKGetPluginInfo(int Index)
+{
+    g_PluginInfo.m_Author = "Ballanced";
+    g_PluginInfo.m_Description = "SDL3 Sound Manager";
+    g_PluginInfo.m_Extension = "";
+    g_PluginInfo.m_Type = CKPLUGIN_MANAGER_DLL;
+    g_PluginInfo.m_Version = 0x000001;
+    g_PluginInfo.m_InitInstanceFct = CreateNewManager;
+    g_PluginInfo.m_ExitInstanceFct = RemoveManager;
+    g_PluginInfo.m_GUID = SDL_SOUNDMANAGER_GUID;
+    g_PluginInfo.m_Summary = SdlSoundManagerName;
+    return &g_PluginInfo;
+}
+
+//-----------------------------------------------------------------------------
+// Audio Conversion Utility Functions
+//-----------------------------------------------------------------------------
+
+float SdlSoundManager::DbToLinear(float db)
+{
+    if (db <= -100.0f) {
+        return 0.0f;
+    }
+    if (db >= 0.0f) {
+        return 1.0f;
+    }
+    return powf(10.0f, db / 20.0f);
+}
+
+float SdlSoundManager::LinearToDb(float linear)
+{
+    if (linear <= 0.0f) {
+        return -100.0f;
+    }
+    if (linear >= 1.0f) {
+        return 0.0f;
+    }
+    return 20.0f * log10f(linear);
+}
+
+SDL_AudioFormat SdlSoundManager::CKFormatToSDL(const CKWaveFormat &wf)
+{
+    // Convert CKWaveFormat to SDL_AudioFormat
+    switch (wf.wBitsPerSample) {
+        case 8:
+            return SDL_AUDIO_U8;
+        case 16:
+            return SDL_AUDIO_S16LE;
+        case 32:
+            return SDL_AUDIO_S32LE;
+        default:
+            return SDL_AUDIO_S16LE;
+    }
+}
+
+//-----------------------------------------------------------------------------
+// SdlSoundSource Implementation
+//-----------------------------------------------------------------------------
+
+SdlSoundSource::SdlSoundSource()
+{
+    m_Stream = NULL;
+    m_Buffer = NULL;
+    m_BufferSize = 0;
+    m_WritePos = 0;
+    m_PlayPos = 0;
+    m_Type = CK_WAVESOUND_BACKGROUND;
+    m_IsPlaying = FALSE;
+    m_IsPaused = FALSE;
+    m_IsLooping = FALSE;
+    m_IsStreamed = FALSE;
+    m_Manager = NULL;
+    m_TotalBytesPushed = 0;
+    m_IsBound = FALSE;
+    
+    memset(&m_Format, 0, sizeof(CKWaveFormat));
+    m_Format.wFormatTag = CKWAVE_FORMAT_PCM;
+    m_Format.nChannels = 2;
+    m_Format.nSamplesPerSec = SDL_DEFAULT_SAMPLE_RATE;
+    m_Format.wBitsPerSample = 16;
+    m_Format.nBlockAlign = 4;
+    m_Format.nAvgBytesPerSec = SDL_DEFAULT_SAMPLE_RATE * 4;
+}
+
+SdlSoundSource::~SdlSoundSource()
+{
+    Cleanup();
+}
+
+void SdlSoundSource::Reset()
+{
+    m_WritePos = 0;
+    m_PlayPos = 0;
+    m_IsPlaying = FALSE;
+    m_IsPaused = FALSE;
+    m_TotalBytesPushed = 0;
+    
+    if (m_Buffer && m_BufferSize > 0) {
+        memset(m_Buffer, 0, m_BufferSize);
+    }
+}
+
+CKBOOL SdlSoundSource::Initialize(SdlSoundManager *manager, CK_WAVESOUND_TYPE type, 
+                                  const CKWaveFormat *wf, CKDWORD bytes, CKBOOL streamed)
+{
+    SDL_AudioSpec spec;
+    
+    if (!manager || !wf || bytes == 0) return FALSE;
+    
+    Cleanup();
+    
+    m_Manager = manager;
+    m_Type = type;
+    m_IsStreamed = streamed;
+    memcpy(&m_Format, wf, sizeof(CKWaveFormat));
+    m_TotalBytesPushed = 0;
+    m_IsBound = FALSE;
+    
+    // Allocate ring buffer
+    m_BufferSize = bytes;
+    m_Buffer = new CKBYTE[bytes];
+    if (!m_Buffer) return FALSE;
+    memset(m_Buffer, 0, bytes);
+    
+    // Ensure audio device exists
+    if (!manager->ValidateMixer()) {
+        Cleanup();
+        return FALSE;
+    }
+    
+    // Create audio stream for feeding data
+    spec.format = SdlSoundManager::CKFormatToSDL(m_Format);
+    spec.channels = m_Format.nChannels;
+    spec.freq = m_Format.nSamplesPerSec;
+    
+    m_Stream = SDL_CreateAudioStream(&spec, &spec);
+    if (!m_Stream) {
+        Cleanup();
+        return FALSE;
+    }
+    
+    // Apply initial settings
+    ApplySettings();
+    
+    return TRUE;
+}
+
+void SdlSoundSource::Cleanup()
+{
+    if (m_Stream) {
+        if (m_IsBound) {
+            SDL_UnbindAudioStream(m_Stream);
+            m_IsBound = FALSE;
+        }
+        SDL_DestroyAudioStream(m_Stream);
+        m_Stream = NULL;
+    }
+    
+    if (m_Buffer) {
+        delete[] m_Buffer;
+        m_Buffer = NULL;
+    }
+    
+    m_BufferSize = 0;
+    m_Manager = NULL;
+    m_TotalBytesPushed = 0;
+}
+
+void SdlSoundSource::ApplySettings()
+{
+    if (!m_Stream) return;
+
+    SDL_SetAudioStreamFrequencyRatio(m_Stream, m_Settings.m_Pitch);
+
+    // Base gain; 3D attenuation (if any) is applied in Apply3DSettings.
+    SDL_SetAudioStreamGain(m_Stream, m_Settings.m_Gain);
+
+    // Minimal pan support: hard-mute one channel at extremes.
+    if (m_Type == CK_WAVESOUND_BACKGROUND && m_Format.nChannels == 2) {
+        if (m_Settings.m_Pan <= -0.99f) {
+            const int map[2] = { 0, -1 };
+            SDL_SetAudioStreamOutputChannelMap(m_Stream, map, 2);
+        } else if (m_Settings.m_Pan >= 0.99f) {
+            const int map[2] = { -1, 1 };
+            SDL_SetAudioStreamOutputChannelMap(m_Stream, map, 2);
+        } else {
+            SDL_SetAudioStreamOutputChannelMap(m_Stream, NULL, 0);
+        }
+    }
+}
+
+void SdlSoundSource::Apply3DSettings(const CKListenerSettings &listener)
+{
+    float distance, attenuation;
+
+    if (!m_Stream) return;
+    
+    // Only apply 3D for non-background sounds
+    if (m_Type == CK_WAVESOUND_BACKGROUND) return;
+
+    const float px = m_3DSettings.m_Position.x * listener.m_DistanceFactor;
+    const float py = m_3DSettings.m_Position.y * listener.m_DistanceFactor;
+    const float pz = m_3DSettings.m_Position.z * listener.m_DistanceFactor;
+
+    // Calculate distance for custom attenuation
+    distance = sqrtf(px * px + py * py + pz * pz);
+    
+    // Apply min/max distance attenuation
+    if (distance < m_3DSettings.m_MinDistance) {
+        attenuation = 1.0f;
+    } else if (distance > m_3DSettings.m_MaxDistance) {
+        attenuation = m_3DSettings.m_MuteAfterMax ? 0.0f : 
+                     m_3DSettings.m_MinDistance / m_3DSettings.m_MaxDistance;
+    } else {
+        // Linear rolloff between min and max
+        float range = m_3DSettings.m_MaxDistance - m_3DSettings.m_MinDistance;
+        float dist_from_min = distance - m_3DSettings.m_MinDistance;
+        attenuation = 1.0f - (dist_from_min / range) * listener.m_RollOff;
+        if (attenuation < 0.0f) attenuation = 0.0f;
+    }
+    
+    // Apply attenuation via per-stream gain (global gain handled at device)
+    SDL_SetAudioStreamGain(m_Stream, m_Settings.m_Gain * attenuation);
+}
+
+//-----------------------------------------------------------------------------
+// SdlSoundManager Constructor/Destructor
+//-----------------------------------------------------------------------------
+
+SdlSoundManager::SdlSoundManager(CKContext *Context) 
+    : CKSoundManager(Context, SdlSoundManagerName)
+{
+    m_Device = 0;
+    m_bInitialized = FALSE;
+    m_Mutex = NULL;
+    m_LastListenerPosition.Set(0.0f, 0.0f, 0.0f);
+    
+    m_Mutex = SDL_CreateMutex();
+    m_Context->RegisterNewManager(this);
+}
+
+SdlSoundManager::~SdlSoundManager()
+{
+    OnCKEnd();
+    
+    if (m_Mutex) {
+        SDL_DestroyMutex(m_Mutex);
+        m_Mutex = NULL;
+    }
+}
+
+//-----------------------------------------------------------------------------
+// Thread Safety Helpers
+//-----------------------------------------------------------------------------
+
+void SdlSoundManager::LockMutex() const
+{
+    if (m_Mutex) {
+        SDL_LockMutex(m_Mutex);
+    }
+}
+
+void SdlSoundManager::UnlockMutex() const
+{
+    if (m_Mutex) {
+        SDL_UnlockMutex(m_Mutex);
+    }
+}
+
+//-----------------------------------------------------------------------------
+// Capability and Status Methods
+//-----------------------------------------------------------------------------
+
+CK_SOUNDMANAGER_CAPS SdlSoundManager::GetCaps()
+{
+    CKDWORD caps = CK_WAVESOUND_SETTINGS_ALL | 
+                   CK_WAVESOUND_3DSETTINGS_ALL | 
+                   CK_LISTENERSETTINGS_ALL | 
+                   CK_WAVESOUND_3DSETTINGS_DISTANCEFACTOR | 
+                   CK_WAVESOUND_3DSETTINGS_DOPPLERFACTOR;
+    
+    // Remove unsupported features
+    caps &= ~(CK_WAVESOUND_SETTINGS_EQUALIZATION | 
+              CK_WAVESOUND_SETTINGS_PRIORITY | 
+              CK_LISTENERSETTINGS_EQ | 
+              CK_LISTENERSETTINGS_PRIORITY | 
+              CK_SOUNDMANAGER_ONFLYTYPE);
+    
+    return (CK_SOUNDMANAGER_CAPS)caps;
+}
+
+CKBOOL SdlSoundManager::IsInitialized()
+{
+    CKBOOL result;
+    LockMutex();
+    result = m_bInitialized && m_Device;
+    UnlockMutex();
+    return result;
+}
+
+//-----------------------------------------------------------------------------
+// Validation Methods
+//-----------------------------------------------------------------------------
+
+CKBOOL SdlSoundManager::ValidateSource(void *source) const
+{
+    return source != NULL;
+}
+
+CKBOOL SdlSoundManager::ValidateMixer() const
+{
+    return m_Device != 0;
+}
+
+//-----------------------------------------------------------------------------
+// Source Creation and Management
+//-----------------------------------------------------------------------------
+
+void *SdlSoundManager::CreateSource(CK_WAVESOUND_TYPE type, CKWaveFormat *wf, CKDWORD bytes, CKBOOL streamed)
+{
+    SdlSoundSource *source;
+    
+    if (!wf || bytes == 0) return NULL;
+    
+    if (m_Context->GetStartOptions() & CK_CONFIG_DISABLEDSOUND) {
+        if (m_Context->IsInInterfaceMode()) {
+            m_Context->OutputToConsole("Cannot create sound: Sound disabled");
+        }
+        return NULL;
+    }
+
+    if (!ValidateMixer()) {
+        if (m_Context->IsInInterfaceMode()) {
+            m_Context->OutputToConsole("Cannot create sound: Sound manager not initialized");
+        }
+        return NULL;
+    }
+
+    source = new SdlSoundSource();
+    if (!source) return NULL;
+    
+    if (!source->Initialize(this, type, wf, bytes, streamed)) {
+        delete source;
+        return NULL;
+    }
+    
+    return source;
+}
+
+void *SdlSoundManager::DuplicateSource(void *source)
+{
+    SdlSoundSource *srcSource;
+    SdlSoundSource *newSource;
+    
+    if (!ValidateSource(source) || !ValidateMixer()) {
+        return NULL;
+    }
+
+    srcSource = (SdlSoundSource*)source;
+    newSource = new SdlSoundSource();
+    if (!newSource) return NULL;
+    
+    // Initialize with same parameters
+    if (!newSource->Initialize(this, srcSource->m_Type, &srcSource->m_Format, 
+                               srcSource->m_BufferSize, srcSource->m_IsStreamed)) {
+        delete newSource;
+        return NULL;
+    }
+    
+    // Copy buffer content
+    if (srcSource->m_Buffer && newSource->m_Buffer && srcSource->m_BufferSize > 0) {
+        memcpy(newSource->m_Buffer, srcSource->m_Buffer, srcSource->m_BufferSize);
+    }
+    
+    // Copy settings
+    newSource->m_Settings = srcSource->m_Settings;
+    newSource->m_3DSettings = srcSource->m_3DSettings;
+    newSource->ApplySettings();
+    
+    return newSource;
+}
+
+void SdlSoundManager::ReleaseSource(void *source)
+{
+    SdlSoundSource *sdlSource;
+    
+    if (!ValidateSource(source)) return;
+    
+    sdlSource = (SdlSoundSource*)source;
+    delete sdlSource;
+}
+
+//-----------------------------------------------------------------------------
+// Playback Control
+//-----------------------------------------------------------------------------
+
+void SdlSoundManager::InternalPause(void *source)
+{
+    SdlSoundSource *sdlSource;
+    
+    if (!ValidateSource(source)) return;
+    
+    sdlSource = (SdlSoundSource*)source;
+    if (sdlSource->m_Stream && sdlSource->m_IsBound) {
+        SDL_UnbindAudioStream(sdlSource->m_Stream);
+        sdlSource->m_IsBound = FALSE;
+    }
+    sdlSource->m_IsPaused = TRUE;
+}
+
+void SdlSoundManager::InternalPlay(void *source, CKBOOL loop)
+{
+    SdlSoundSource *sdlSource;
+    
+    if (!ValidateSource(source)) return;
+    
+    sdlSource = (SdlSoundSource*)source;
+    if (!ValidateMixer() || !sdlSource->m_Stream) return;
+
+    if (!sdlSource->m_IsBound) {
+        if (!SDL_BindAudioStream(m_Device, sdlSource->m_Stream)) {
+            if (m_Context->IsInInterfaceMode()) {
+                m_Context->OutputToConsole("Failed to bind SDL audio stream");
+            }
+            return;
+        }
+        sdlSource->m_IsBound = TRUE;
+    }
+    
+    // For non-streamed sounds, put entire buffer in stream
+    if (!sdlSource->m_IsStreamed && sdlSource->m_Buffer && sdlSource->m_BufferSize > 0) {
+        // Clear any existing data
+        SDL_ClearAudioStream(sdlSource->m_Stream);
+        sdlSource->m_TotalBytesPushed = 0;
+
+        const CKDWORD startPos = min((CKDWORD)max(0, sdlSource->m_PlayPos), sdlSource->m_BufferSize);
+        const CKDWORD tailBytes = sdlSource->m_BufferSize - startPos;
+
+        if (tailBytes > 0) {
+            SDL_PutAudioStreamData(sdlSource->m_Stream, sdlSource->m_Buffer + startPos, (int)tailBytes);
+            sdlSource->m_TotalBytesPushed += tailBytes;
+        }
+        if (loop && startPos > 0) {
+            SDL_PutAudioStreamData(sdlSource->m_Stream, sdlSource->m_Buffer, (int)startPos);
+            sdlSource->m_TotalBytesPushed += startPos;
+        }
+        SDL_FlushAudioStream(sdlSource->m_Stream);
+    }
+    
+    sdlSource->m_IsPlaying = TRUE;
+    sdlSource->m_IsPaused = FALSE;
+    sdlSource->m_IsLooping = loop;
+}
+
+void SdlSoundManager::Play(CKWaveSound *ws, void *source, CKBOOL loop)
+{
+    SdlSoundSource *sdlSource = NULL;
+    SoundMinion *minion;
+    
+    if (!ValidateSource(source)) return;
+    
+    if (ws) {
+        // Normal sound
+        sdlSource = (SdlSoundSource*)source;
+        m_SoundsPlaying.AddIfNotHere(ws->GetID());
+    } else {
+        // Minion sound
+        minion = (SoundMinion*)source;
+        if (minion && minion->m_Source) {
+            sdlSource = (SdlSoundSource*)minion->m_Source;
+        }
+    }
+    
+    if (sdlSource) {
+        InternalPlay(sdlSource, loop);
+    }
+}
+
+void SdlSoundManager::Pause(CKWaveSound *ws, void *source)
+{
+    if (!ValidateSource(source)) return;
+    InternalPause(source);
+}
+
+void SdlSoundManager::SetPlayPosition(void *source, int pos)
+{
+    SdlSoundSource *sdlSource;
+    
+    if (!ValidateSource(source) || pos < 0) return;
+    
+    sdlSource = (SdlSoundSource*)source;
+    sdlSource->m_PlayPos = (CKDWORD)pos;
+
+    if (!sdlSource->m_IsStreamed && sdlSource->m_Stream && sdlSource->m_IsPlaying) {
+        SDL_ClearAudioStream(sdlSource->m_Stream);
+        sdlSource->m_TotalBytesPushed = 0;
+
+        const CKDWORD startPos = min((CKDWORD)pos, sdlSource->m_BufferSize);
+        const CKDWORD tailBytes = sdlSource->m_BufferSize - startPos;
+        if (tailBytes > 0) {
+            SDL_PutAudioStreamData(sdlSource->m_Stream, sdlSource->m_Buffer + startPos, (int)tailBytes);
+            sdlSource->m_TotalBytesPushed += tailBytes;
+        }
+        if (sdlSource->m_IsLooping && startPos > 0) {
+            SDL_PutAudioStreamData(sdlSource->m_Stream, sdlSource->m_Buffer, (int)startPos);
+            sdlSource->m_TotalBytesPushed += startPos;
+        }
+        SDL_FlushAudioStream(sdlSource->m_Stream);
+    }
+}
+
+int SdlSoundManager::GetPlayPosition(void *source)
+{
+    SdlSoundSource *sdlSource;
+    
+    if (!ValidateSource(source)) return 0;
+    
+    sdlSource = (SdlSoundSource*)source;
+
+    if (sdlSource->m_Stream) {
+        const int queued = SDL_GetAudioStreamQueued(sdlSource->m_Stream);
+        if (queued >= 0) {
+            const Uint64 q = (Uint64)queued;
+            const Uint64 consumed = (sdlSource->m_TotalBytesPushed > q) ? (sdlSource->m_TotalBytesPushed - q) : 0;
+
+            if (!sdlSource->m_IsStreamed && sdlSource->m_BufferSize > 0) {
+                return (int)(consumed % sdlSource->m_BufferSize);
+            }
+            return (int)consumed;
+        }
+    }
+
+    return (int)sdlSource->m_PlayPos;
+}
+
+CKBOOL SdlSoundManager::IsPlaying(void *source)
+{
+    SdlSoundSource *sdlSource;
+    
+    if (!ValidateSource(source)) return FALSE;
+    
+    sdlSource = (SdlSoundSource*)source;
+
+    if (!sdlSource->m_IsPlaying || sdlSource->m_IsPaused) {
+        return FALSE;
+    }
+
+    if (!sdlSource->m_Stream) {
+        return FALSE;
+    }
+
+    const int queued = SDL_GetAudioStreamQueued(sdlSource->m_Stream);
+    const int available = SDL_GetAudioStreamAvailable(sdlSource->m_Stream);
+    const CKBOOL drained = (queued == 0 && available == 0);
+
+    if (drained && !sdlSource->m_IsLooping) {
+        // Sound has finished.
+        if (sdlSource->m_IsBound) {
+            SDL_UnbindAudioStream(sdlSource->m_Stream);
+            sdlSource->m_IsBound = FALSE;
+        }
+        sdlSource->m_IsPlaying = FALSE;
+        return FALSE;
+    }
+
+    if (drained && sdlSource->m_IsLooping && !sdlSource->m_IsStreamed && sdlSource->m_Buffer && sdlSource->m_BufferSize > 0) {
+        // Simple loop support: queue another copy of the whole buffer.
+        SDL_PutAudioStreamData(sdlSource->m_Stream, sdlSource->m_Buffer, (int)sdlSource->m_BufferSize);
+        sdlSource->m_TotalBytesPushed += sdlSource->m_BufferSize;
+        SDL_FlushAudioStream(sdlSource->m_Stream);
+    }
+
+    return TRUE;
+}
+
+//-----------------------------------------------------------------------------
+// PCM Buffer Information
+//-----------------------------------------------------------------------------
+
+CKERROR SdlSoundManager::SetWaveFormat(void *source, CKWaveFormat &wf)
+{
+    SdlSoundSource *sdlSource;
+    SDL_AudioSpec spec;
+    
+    if (!ValidateSource(source)) return CKERR_INVALIDPARAMETER;
+    
+    sdlSource = (SdlSoundSource*)source;
+    memcpy(&sdlSource->m_Format, &wf, sizeof(CKWaveFormat));
+    
+    // Update stream format
+    if (sdlSource->m_Stream) {
+        spec.format = CKFormatToSDL(wf);
+        spec.channels = wf.nChannels;
+        spec.freq = wf.nSamplesPerSec;
+        SDL_SetAudioStreamFormat(sdlSource->m_Stream, &spec, NULL);
+    }
+    
+    return CK_OK;
+}
+
+CKERROR SdlSoundManager::GetWaveFormat(void *source, CKWaveFormat &wf)
+{
+    SdlSoundSource *sdlSource;
+    
+    if (!ValidateSource(source)) return CKERR_INVALIDPARAMETER;
+    
+    sdlSource = (SdlSoundSource*)source;
+    memcpy(&wf, &sdlSource->m_Format, sizeof(CKWaveFormat));
+    
+    return CK_OK;
+}
+
+int SdlSoundManager::GetWaveSize(void *source)
+{
+    SdlSoundSource *sdlSource;
+    
+    if (!ValidateSource(source)) return 0;
+    
+    sdlSource = (SdlSoundSource*)source;
+    return (int)sdlSource->m_BufferSize;
+}
+
+//-----------------------------------------------------------------------------
+// Buffer Access (Ring Buffer for Streaming)
+//-----------------------------------------------------------------------------
+
+CKERROR SdlSoundManager::Lock(void *source, CKDWORD dwWriteCursor, CKDWORD dwNumBytes, 
+                             void **pvAudioPtr1, CKDWORD *dwAudioBytes1, 
+                             void **pvAudioPtr2, CKDWORD *dwAudioBytes2, 
+                             CK_WAVESOUND_LOCKMODE dwFlags)
+{
+    SdlSoundSource *sdlSource;
+    CKDWORD bufferSize;
+    CKDWORD startPos;
+    CKDWORD bytesToEnd;
+    
+    if (!ValidateSource(source) || !pvAudioPtr1 || !dwAudioBytes1) {
+        return CKERR_INVALIDPARAMETER;
+    }
+    
+    sdlSource = (SdlSoundSource*)source;
+    
+    if (!sdlSource->m_Buffer || sdlSource->m_BufferSize == 0) {
+        return CKERR_INVALIDPARAMETER;
+    }
+    
+    bufferSize = sdlSource->m_BufferSize;
+    
+    // Handle lock from write cursor flag
+    if (dwFlags & CK_WAVESOUND_LOCKFROMWRITE) {
+        startPos = sdlSource->m_WritePos;
+    } else {
+        startPos = dwWriteCursor % bufferSize;
+    }
+    
+    // Calculate how many bytes until end of buffer
+    bytesToEnd = bufferSize - startPos;
+    
+    if (dwNumBytes <= bytesToEnd) {
+        // No wrap needed
+        *pvAudioPtr1 = sdlSource->m_Buffer + startPos;
+        *dwAudioBytes1 = dwNumBytes;
+        
+        if (pvAudioPtr2) *pvAudioPtr2 = NULL;
+        if (dwAudioBytes2) *dwAudioBytes2 = 0;
+    } else {
+        // Wrap around needed
+        *pvAudioPtr1 = sdlSource->m_Buffer + startPos;
+        *dwAudioBytes1 = bytesToEnd;
+        
+        if (pvAudioPtr2 && dwAudioBytes2) {
+            *pvAudioPtr2 = sdlSource->m_Buffer;
+            *dwAudioBytes2 = dwNumBytes - bytesToEnd;
+        }
+    }
+    
+    return CK_OK;
+}
+
+CKERROR SdlSoundManager::Unlock(void *source, void *pvAudioPtr1, CKDWORD dwNumBytes1, 
+                                void *pvAudioPtr2, CKDWORD dwAudioBytes2)
+{
+    SdlSoundSource *sdlSource;
+    CKDWORD totalBytes;
+    
+    if (!ValidateSource(source)) return CKERR_INVALIDPARAMETER;
+    
+    sdlSource = (SdlSoundSource*)source;
+    totalBytes = dwNumBytes1 + dwAudioBytes2;
+    
+    // Update write position
+    sdlSource->m_WritePos = (sdlSource->m_WritePos + totalBytes) % sdlSource->m_BufferSize;
+    
+    // For streamed sounds, feed data to SDL audio stream
+    if (sdlSource->m_IsStreamed && sdlSource->m_Stream) {
+        if (pvAudioPtr1 && dwNumBytes1 > 0) {
+            SDL_PutAudioStreamData(sdlSource->m_Stream, pvAudioPtr1, dwNumBytes1);
+            sdlSource->m_TotalBytesPushed += dwNumBytes1;
+        }
+        if (pvAudioPtr2 && dwAudioBytes2 > 0) {
+            SDL_PutAudioStreamData(sdlSource->m_Stream, pvAudioPtr2, dwAudioBytes2);
+            sdlSource->m_TotalBytesPushed += dwAudioBytes2;
+        }
+    }
+    
+    return CK_OK;
+}
+
+//-----------------------------------------------------------------------------
+// Type Management
+//-----------------------------------------------------------------------------
+
+void SdlSoundManager::SetType(void *source, CK_WAVESOUND_TYPE type)
+{
+    SdlSoundSource *sdlSource;
+    
+    if (!ValidateSource(source)) return;
+    
+    sdlSource = (SdlSoundSource*)source;
+    sdlSource->m_Type = type;
+
+    sdlSource->ApplySettings();
+    sdlSource->Apply3DSettings(m_ListenerSettings);
+}
+
+CK_WAVESOUND_TYPE SdlSoundManager::GetType(void *source)
+{
+    SdlSoundSource *sdlSource;
+    
+    if (!ValidateSource(source)) return (CK_WAVESOUND_TYPE)0;
+    
+    sdlSource = (SdlSoundSource*)source;
+    return sdlSource->m_Type;
+}
+
+//-----------------------------------------------------------------------------
+// Settings Management
+//-----------------------------------------------------------------------------
+
+void SdlSoundManager::UpdateSettings(void *source, CK_SOUNDMANAGER_CAPS settingsoptions, 
+                                     CKWaveSoundSettings &settings, CKBOOL set)
+{
+    SdlSoundSource *sdlSource;
+    
+    if (!ValidateSource(source)) return;
+    
+    sdlSource = (SdlSoundSource*)source;
+    
+    if (set) {
+        // Set settings
+        if (settingsoptions & CK_WAVESOUND_SETTINGS_GAIN) {
+            sdlSource->m_Settings.m_Gain = settings.m_Gain;
+        }
+        
+        if (settingsoptions & CK_WAVESOUND_SETTINGS_PITCH) {
+            sdlSource->m_Settings.m_Pitch = settings.m_Pitch;
+        }
+        
+        if (settingsoptions & CK_WAVESOUND_SETTINGS_PAN) {
+            sdlSource->m_Settings.m_Pan = settings.m_Pan;
+        }
+        
+        if (settingsoptions & CK_WAVESOUND_SETTINGS_PRIORITY) {
+            sdlSource->m_Settings.m_Priority = settings.m_Priority;
+        }
+        
+        if (settingsoptions & CK_WAVESOUND_SETTINGS_EQUALIZATION) {
+            sdlSource->m_Settings.m_Eq = settings.m_Eq;
+        }
+        
+        sdlSource->ApplySettings();
+    } else {
+        // Get settings
+        if (settingsoptions & CK_WAVESOUND_SETTINGS_GAIN) {
+            settings.m_Gain = sdlSource->m_Settings.m_Gain;
+        }
+        
+        if (settingsoptions & CK_WAVESOUND_SETTINGS_PITCH) {
+            settings.m_Pitch = sdlSource->m_Settings.m_Pitch;
+        }
+        
+        if (settingsoptions & CK_WAVESOUND_SETTINGS_PAN) {
+            settings.m_Pan = sdlSource->m_Settings.m_Pan;
+        }
+        
+        if (settingsoptions & CK_WAVESOUND_SETTINGS_PRIORITY) {
+            settings.m_Priority = sdlSource->m_Settings.m_Priority;
+        }
+        
+        if (settingsoptions & CK_WAVESOUND_SETTINGS_EQUALIZATION) {
+            settings.m_Eq = sdlSource->m_Settings.m_Eq;
+        }
+    }
+}
+
+//-----------------------------------------------------------------------------
+// 3D Settings Management
+//-----------------------------------------------------------------------------
+
+void SdlSoundManager::Update3DSettings(void *source, CK_SOUNDMANAGER_CAPS settingsoptions, 
+                                       CKWaveSound3DSettings &settings, CKBOOL set)
+{
+    SdlSoundSource *sdlSource;
+    
+    if (!ValidateSource(source)) return;
+    
+    sdlSource = (SdlSoundSource*)source;
+    
+    if (set) {
+        // Set 3D settings
+        if (settingsoptions & CK_WAVESOUND_3DSETTINGS_CONE) {
+            sdlSource->m_3DSettings.m_InAngle = settings.m_InAngle;
+            sdlSource->m_3DSettings.m_OutAngle = settings.m_OutAngle;
+            sdlSource->m_3DSettings.m_OutsideGain = settings.m_OutsideGain;
+        }
+        
+        if (settingsoptions & CK_WAVESOUND_3DSETTINGS_MINMAXDISTANCE) {
+            sdlSource->m_3DSettings.m_MinDistance = settings.m_MinDistance;
+            sdlSource->m_3DSettings.m_MaxDistance = settings.m_MaxDistance;
+        }
+        
+        if (settingsoptions & CK_WAVESOUND_3DSETTINGS_POSITION) {
+            sdlSource->m_3DSettings.m_Position = settings.m_Position;
+        }
+        
+        if (settingsoptions & CK_WAVESOUND_3DSETTINGS_VELOCITY) {
+            sdlSource->m_3DSettings.m_Velocity = settings.m_Velocity;
+        }
+        
+        if (settingsoptions & CK_WAVESOUND_3DSETTINGS_ORIENTATION) {
+            sdlSource->m_3DSettings.m_OrientationDir = settings.m_OrientationDir;
+            sdlSource->m_3DSettings.m_OrientationUp = settings.m_OrientationUp;
+        }
+        
+        if (settingsoptions & CK_WAVESOUND_3DSETTINGS_HEADRELATIVE) {
+            sdlSource->m_3DSettings.m_HeadRelative = settings.m_HeadRelative;
+            sdlSource->m_3DSettings.m_MuteAfterMax = settings.m_MuteAfterMax;
+        }
+        
+        // Apply 3D settings
+        sdlSource->Apply3DSettings(m_ListenerSettings);
+    } else {
+        // Get 3D settings
+        if (settingsoptions & CK_WAVESOUND_3DSETTINGS_CONE) {
+            settings.m_InAngle = sdlSource->m_3DSettings.m_InAngle;
+            settings.m_OutAngle = sdlSource->m_3DSettings.m_OutAngle;
+            settings.m_OutsideGain = sdlSource->m_3DSettings.m_OutsideGain;
+        }
+        
+        if (settingsoptions & CK_WAVESOUND_3DSETTINGS_MINMAXDISTANCE) {
+            settings.m_MinDistance = sdlSource->m_3DSettings.m_MinDistance;
+            settings.m_MaxDistance = sdlSource->m_3DSettings.m_MaxDistance;
+        }
+        
+        if (settingsoptions & CK_WAVESOUND_3DSETTINGS_POSITION) {
+            settings.m_Position = sdlSource->m_3DSettings.m_Position;
+        }
+        
+        if (settingsoptions & CK_WAVESOUND_3DSETTINGS_VELOCITY) {
+            settings.m_Velocity = sdlSource->m_3DSettings.m_Velocity;
+        }
+        
+        if (settingsoptions & CK_WAVESOUND_3DSETTINGS_ORIENTATION) {
+            settings.m_OrientationDir = sdlSource->m_3DSettings.m_OrientationDir;
+            settings.m_OrientationUp = sdlSource->m_3DSettings.m_OrientationUp;
+        }
+        
+        if (settingsoptions & CK_WAVESOUND_3DSETTINGS_HEADRELATIVE) {
+            settings.m_HeadRelative = sdlSource->m_3DSettings.m_HeadRelative;
+            settings.m_MuteAfterMax = sdlSource->m_3DSettings.m_MuteAfterMax;
+        }
+    }
+}
+
+//-----------------------------------------------------------------------------
+// Listener Settings
+//-----------------------------------------------------------------------------
+
+void SdlSoundManager::UpdateListenerSettings(CK_SOUNDMANAGER_CAPS settingsoptions, 
+                                             CKListenerSettings &settings, CKBOOL set)
+{
+    if (set) {
+        if (settingsoptions & CK_LISTENERSETTINGS_DISTANCE) {
+            m_ListenerSettings.m_DistanceFactor = settings.m_DistanceFactor;
+        }
+        if (settingsoptions & CK_LISTENERSETTINGS_DOPPLER) {
+            m_ListenerSettings.m_DopplerFactor = settings.m_DopplerFactor;
+        }
+        if (settingsoptions & CK_LISTENERSETTINGS_ROLLOFF) {
+            m_ListenerSettings.m_RollOff = settings.m_RollOff;
+        }
+        if (settingsoptions & CK_LISTENERSETTINGS_GAIN) {
+            m_ListenerSettings.m_GlobalGain = settings.m_GlobalGain;
+            if (m_Device) {
+                SDL_SetAudioDeviceGain(m_Device, settings.m_GlobalGain);
+            }
+        }
+        if (settingsoptions & CK_LISTENERSETTINGS_PRIORITY) {
+            m_ListenerSettings.m_PriorityBias = settings.m_PriorityBias;
+        }
+        if (settingsoptions & CK_LISTENERSETTINGS_SOFTWARESOURCES) {
+            m_ListenerSettings.m_SoftwareSources = settings.m_SoftwareSources;
+        }
+    } else {
+        if (settingsoptions & CK_LISTENERSETTINGS_DISTANCE) {
+            settings.m_DistanceFactor = m_ListenerSettings.m_DistanceFactor;
+        }
+        if (settingsoptions & CK_LISTENERSETTINGS_DOPPLER) {
+            settings.m_DopplerFactor = m_ListenerSettings.m_DopplerFactor;
+        }
+        if (settingsoptions & CK_LISTENERSETTINGS_ROLLOFF) {
+            settings.m_RollOff = m_ListenerSettings.m_RollOff;
+        }
+        if (settingsoptions & CK_LISTENERSETTINGS_GAIN) {
+            settings.m_GlobalGain = m_ListenerSettings.m_GlobalGain;
+        }
+        if (settingsoptions & CK_LISTENERSETTINGS_PRIORITY) {
+            settings.m_PriorityBias = m_ListenerSettings.m_PriorityBias;
+        }
+        if (settingsoptions & CK_LISTENERSETTINGS_SOFTWARESOURCES) {
+            settings.m_SoftwareSources = m_ListenerSettings.m_SoftwareSources;
+        }
+    }
+}
+
+//-----------------------------------------------------------------------------
+// 3D Positioning
+//-----------------------------------------------------------------------------
+
+void SdlSoundManager::PositionSource(SdlSoundSource *source, CK3dEntity *ent, 
+                                     const VxVector &position, const VxVector &direction, 
+                                     VxVector &oldpos)
+{
+    VxVector pos, vel;
+
+    if (!source) return;
+    
+    // Calculate position
+    pos = position;
+    if (ent) {
+        ent->Transform(&pos, &position);
+    }
+    
+    // Calculate velocity
+    vel = pos - oldpos;
+    
+    // Update 3D position in source settings
+    source->m_3DSettings.m_Position = pos;
+    source->m_3DSettings.m_Velocity = vel;
+
+    source->Apply3DSettings(m_ListenerSettings);
+    
+    oldpos = pos;
+}
+
+//-----------------------------------------------------------------------------
+// Lifecycle Management
+//-----------------------------------------------------------------------------
+
+CKERROR SdlSoundManager::PostClearAll()
+{
+    CKERROR result;
+    
+    LockMutex();
+    
+    result = CKSoundManager::PostClearAll();
+    m_SoundsPlaying.Clear();
+    ReleaseMinions();
+    RegisterAttribute();
+    
+    UnlockMutex();
+    return result;
+}
+
+CKERROR SdlSoundManager::OnCKInit()
+{
+    SDL_AudioSpec spec;
+    int soundsCount, i;
+    CK_ID *soundIds;
+    CKWaveSound *ws;
+    
+    if (m_Context->GetStartOptions() & CK_CONFIG_DISABLEDSOUND) {
+        return CK_OK;
+    }
+
+    LockMutex();
+
+    // Initialize SDL audio subsystem if needed
+    if ((SDL_WasInit(SDL_INIT_AUDIO) & SDL_INIT_AUDIO) == 0) {
+        if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+            if (m_Context->IsInInterfaceMode()) {
+                m_Context->OutputToConsole("SDL audio initialization failed");
+            }
+            UnlockMutex();
+            return CKERR_INVALIDOPERATION;
+        }
+    }
+    
+    // Set up audio format
+    spec.format = SDL_AUDIO_S16LE;
+    spec.channels = SDL_DEFAULT_CHANNELS;
+    spec.freq = SDL_DEFAULT_SAMPLE_RATE;
+
+    // Open logical playback device
+    m_Device = SDL_OpenAudioDevice(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec);
+    if (!m_Device) {
+        if (m_Context->IsInInterfaceMode()) {
+            m_Context->OutputToConsole("Failed to open SDL audio device");
+        }
+        UnlockMutex();
+        return CKERR_INVALIDOPERATION;
+    }
+
+    SDL_SetAudioDeviceGain(m_Device, m_ListenerSettings.m_GlobalGain);
+    
+    RegisterAttribute();
+
+    // Recreate existing sounds
+    soundsCount = m_Context->GetObjectsCountByClassID(CKCID_WAVESOUND);
+    if (soundsCount > 0) {
+        soundIds = m_Context->GetObjectsListByClassID(CKCID_WAVESOUND);
+        for (i = 0; i < soundsCount; ++i) {
+            ws = (CKWaveSound*)m_Context->GetObject(soundIds[i]);
+            if (ws) {
+                ws->Recreate();
+            }
+        }
+    }
+    
+    m_bInitialized = TRUE;
+    UnlockMutex();
+    return CK_OK;
+}
+
+CKERROR SdlSoundManager::OnCKEnd()
+{
+    if (m_Context->GetStartOptions() & CK_CONFIG_DISABLEDSOUND) {
+        return CK_OK;
+    }
+
+    LockMutex();
+    
+    // Stop all sounds and clean up
+    StopAllPlayingSounds();
+    CleanupMixerResources();
+    
+    m_bInitialized = FALSE;
+    
+    UnlockMutex();
+    return CK_OK;
+}
+
+void SdlSoundManager::CleanupMixerResources()
+{
+    if (m_Device) {
+        SDL_CloseAudioDevice(m_Device);
+        m_Device = 0;
+    }
+}
+
+void SdlSoundManager::StopAllPlayingSounds()
+{
+    int soundsCount, i;
+    CK_ID *soundIds;
+    CKWaveSound *ws;
+    
+    // Release existing sounds
+    soundsCount = m_Context->GetObjectsCountByClassID(CKCID_WAVESOUND);
+    if (soundsCount > 0) {
+        soundIds = m_Context->GetObjectsListByClassID(CKCID_WAVESOUND);
+        for (i = 0; i < soundsCount; ++i) {
+            ws = (CKWaveSound*)m_Context->GetObject(soundIds[i]);
+            if (ws) {
+                ws->Release();
+            }
+        }
+    }
+}
+
+CKERROR SdlSoundManager::PostProcess()
+{
+    float deltaTime;
+    CKBOOL somethingIsPlayingIn3D;
+    CK_ID *it;
+    CKWaveSound *ws;
+    SoundMinion **itm;
+    SdlSoundSource *source;
+    CK3dEntity *ent;
+    CK3dEntity *listener;
+    const VxMatrix *mat;
+    const VxVector4 *pos;
+    VxVector velocity;
+    
+    if (!ValidateMixer()) return CK_OK;
+    
+    LockMutex();
+    
+    deltaTime = m_Context->GetTimeManager()->GetLastDeltaTime();
+    somethingIsPlayingIn3D = FALSE;
+
+    // Update playing sounds
+    for (it = m_SoundsPlaying.Begin(); it != m_SoundsPlaying.End();) {
+        ws = (CKWaveSound*)m_Context->GetObject(*it);
+        
+        if (ws && ws->IsPlaying()) {
+            // Handle file streaming
+            if (ws->GetFileStreaming() && !(ws->GetState() & CK_WAVESOUND_STREAMFULLYLOADED)) {
+                ws->WriteDataFromReader();
+            }
+
+            // Update fade
+            ws->UpdateFade();
+
+            // Update 3D position
+            if (!(ws->GetType() & CK_WAVESOUND_BACKGROUND)) {
+                somethingIsPlayingIn3D = TRUE;
+                ws->UpdatePosition(deltaTime);
+            }
+
+            ++it;
+        } else {
+            it = m_SoundsPlaying.Remove(it);
+        }
+    }
+
+    // Update minions
+    for (itm = m_Minions.Begin(); itm != m_Minions.End(); ++itm) {
+        if (IsPlaying((*itm)->m_Source)) {
+            somethingIsPlayingIn3D = TRUE;
+            source = (SdlSoundSource*)(*itm)->m_Source;
+            
+            if ((*itm)->m_Entity) {
+                ent = (CK3dEntity*)m_Context->GetObject((*itm)->m_Entity);
+                if (ent && source) {
+                    PositionSource(source, ent, (*itm)->m_Position, 
+                                  (*itm)->m_Direction, (*itm)->m_OldPosition);
+                }
+            }
+        }
+    }
+
+    // Update listener if something is playing in 3D
+    if (somethingIsPlayingIn3D) {
+        listener = GetListener();
+        if (listener) {
+            mat = &listener->GetWorldMatrix();
+            pos = &(*mat)[3];
+            
+            velocity = VxVector(pos->x, pos->y, pos->z) - m_LastListenerPosition;
+            m_LastListenerPosition.Set(pos->x, pos->y, pos->z);
+            
+            // SDL_mixer doesn't have a listener position API (listener is always at origin)
+            // So we need to update all 3D sources relative to listener position
+            // This is handled in the 3D source position updates above
+        }
+    }
+
+    // Process minions (cleanup finished ones)
+    ProcessMinions();
+    
+    UnlockMutex();
+    return CK_OK;
+}
+
+CKERROR SdlSoundManager::OnCKReset()
+{
+    CK_ID *it;
+    CKWaveSound *ws;
+    
+    if (!ValidateMixer()) return CK_OK;
+    
+    LockMutex();
+
+    // Stop all playing sounds
+    for (it = m_SoundsPlaying.Begin(); it != m_SoundsPlaying.End(); ++it) {
+        ws = (CKWaveSound*)m_Context->GetObject(*it);
+        if (ws && ws->m_Source) {
+            ws->InternalStop();
+        }
+    }
+
+    m_SoundsPlaying.Clear();
+    ReleaseMinions();
+
+    UnlockMutex();
+    return CK_OK;
+}
+
+CKERROR SdlSoundManager::OnCKPause()
+{
+    CK_ID *it;
+    CKWaveSound *ws;
+    
+    // Pause all currently playing sounds
+    for (it = m_SoundsPlaying.Begin(); it != m_SoundsPlaying.End(); ++it) {
+        ws = (CKWaveSound*)m_Context->GetObject(*it);
+        if (ws) {
+            ws->Pause();
+        }
+    }
+
+    // Pause all minions
+    PauseMinions();
+
+    return CK_OK;
+}
+
+CKERROR SdlSoundManager::OnCKPlay()
+{
+    CK_ID *it;
+    CKWaveSound *ws;
+    
+    // Resume all paused sounds
+    for (it = m_SoundsPlaying.Begin(); it != m_SoundsPlaying.End(); ++it) {
+        ws = (CKWaveSound*)m_Context->GetObject(*it);
+        if (ws) {
+            ws->Resume();
+        }
+    }
+
+    // Resume all minions
+    ResumeMinions();
+
+    return CK_OK;
+}
+
+CKERROR SdlSoundManager::PreLaunchScene(CKScene *OldScene, CKScene *NewScene)
+{
+    CK_ID *it;
+    CKWaveSound *ws;
+    SoundMinion **itm;
+    CKSceneObject *sceneObj;
+    
+    if (!NewScene) return CKERR_INVALIDPARAMETER;
+
+    // Pause sounds that are not in the new scene
+    for (it = m_SoundsPlaying.Begin(); it != m_SoundsPlaying.End(); ++it) {
+        ws = (CKWaveSound*)m_Context->GetObject(*it);
+        if (ws && !ws->IsInScene(NewScene)) {
+            ws->Pause();
+        }
+    }
+
+    // Stop minions whose models are not in the new scene
+    for (itm = m_Minions.Begin(); itm != m_Minions.End();) {
+        if (!*itm) {
+            itm = m_Minions.Remove(itm);
+            continue;
+        }
+
+        sceneObj = (CKSceneObject*)m_Context->GetObject((*itm)->m_OriginalSound);
+        if (!sceneObj || !sceneObj->IsInScene(NewScene)) {
+            // Stop and release the minion
+            Stop(NULL, (*itm)->m_Source);
+            ReleaseSource((*itm)->m_Source);
+            delete *itm;
+            itm = m_Minions.Remove(itm);
+        } else {
+            ++itm;
+        }
+    }
+
+    return CK_OK;
+}
+
+CKERROR SdlSoundManager::SequenceToBeDeleted(CK_ID *objids, int count)
+{
+    CKERROR result;
+    CK_ID *it;
+    CKWaveSound *ws;
+    SoundMinion **itm;
+    CKObject *entity;
+    
+    if (!objids || count <= 0) return CKERR_INVALIDPARAMETER;
+
+    // Call base class implementation
+    result = CKSoundManager::SequenceDeleted(objids, count);
+
+    // Stop and remove sounds that are being deleted
+    for (it = m_SoundsPlaying.Begin(); it != m_SoundsPlaying.End();) {
+        ws = (CKWaveSound*)m_Context->GetObject(*it);
+        if (!ws || ws->IsToBeDeleted()) {
+            if (ws) {
+                ws->Stop();
+            }
+            it = m_SoundsPlaying.Remove(it);
+        } else {
+            ++it;
+        }
+    }
+
+    // Clean up minions with deleted entities
+    for (itm = m_Minions.Begin(); itm != m_Minions.End(); ++itm) {
+        if (!*itm) continue;
+
+        // Check if original sound is being deleted
+        ws = (CKWaveSound*)m_Context->GetObject((*itm)->m_OriginalSound);
+        if (ws && ws->IsToBeDeleted()) {
+            (*itm)->m_OriginalSound = 0;
+        }
+
+        // Check if attached entity is being deleted
+        entity = m_Context->GetObject((*itm)->m_Entity);
+        if (!entity || entity->IsToBeDeleted()) {
+            (*itm)->m_Entity = 0;
+        }
+    }
+
+    return result;
+}
