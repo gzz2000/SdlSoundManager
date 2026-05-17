@@ -36,7 +36,7 @@
 
 // Plugin export info
 static CKPluginInfo g_PluginInfo;
-static char *SdlSoundManagerName = "SDL Sound Manager";
+static const char *SdlSoundManagerName = "SDL Sound Manager";
 
 CKERROR CreateSdlSoundManager(CKContext *context)
 {
