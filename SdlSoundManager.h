@@ -200,6 +200,10 @@ struct SdlSoundSource
     
     // Reference to parent manager
     SdlSoundManager *m_Manager;
+
+    // Software stereo panning state
+    float m_LeftGain;
+    float m_RightGain;
     
     SdlSoundSource();
     ~SdlSoundSource();
@@ -212,6 +216,9 @@ struct SdlSoundSource
     // Update track settings from current state
     void ApplySettings();
     void Apply3DSettings(const CKListenerSettings &listener);
+    void QueueAudioData(const void *data, CKDWORD bytes);
+    void RefreshQueuedAudio();
+    int GetQueuedSourceBytes() const;
 };
 
 // Factory function

@@ -38,6 +38,27 @@
 static CKPluginInfo g_PluginInfo;
 static const char *SdlSoundManagerName = "SDL Sound Manager";
 
+static float ClampFloat(float value, float minValue, float maxValue)
+{
+    if (value < minValue) return minValue;
+    if (value > maxValue) return maxValue;
+    return value;
+}
+
+static Sint16 ClampSint16(float value)
+{
+    if (value < -32768.0f) return -32768;
+    if (value > 32767.0f) return 32767;
+    return (Sint16)value;
+}
+
+static Sint32 ClampSint32(double value)
+{
+    if (value < -2147483648.0) return (Sint32)(-2147483647 - 1);
+    if (value > 2147483647.0) return 2147483647;
+    return (Sint32)value;
+}
+
 CKERROR CreateSdlSoundManager(CKContext *context)
 {
     if (!context) return CKERR_INVALIDPARAMETER;
@@ -141,6 +162,8 @@ SdlSoundSource::SdlSoundSource()
     m_Manager = NULL;
     m_TotalBytesPushed = 0;
     m_IsBound = FALSE;
+    m_LeftGain = 1.0f;
+    m_RightGain = 1.0f;
     
     memset(&m_Format, 0, sizeof(CKWaveFormat));
     m_Format.wFormatTag = CKWAVE_FORMAT_PCM;
@@ -163,6 +186,8 @@ void SdlSoundSource::Reset()
     m_IsPlaying = FALSE;
     m_IsPaused = FALSE;
     m_TotalBytesPushed = 0;
+    m_LeftGain = 1.0f;
+    m_RightGain = 1.0f;
     
     if (m_Buffer && m_BufferSize > 0) {
         memset(m_Buffer, 0, m_BufferSize);
@@ -173,6 +198,7 @@ CKBOOL SdlSoundSource::Initialize(SdlSoundManager *manager, CK_WAVESOUND_TYPE ty
                                   const CKWaveFormat *wf, CKDWORD bytes, CKBOOL streamed)
 {
     SDL_AudioSpec spec;
+    SDL_AudioSpec streamSpec;
     
     if (!manager || !wf || bytes == 0) return FALSE;
     
@@ -184,6 +210,8 @@ CKBOOL SdlSoundSource::Initialize(SdlSoundManager *manager, CK_WAVESOUND_TYPE ty
     memcpy(&m_Format, wf, sizeof(CKWaveFormat));
     m_TotalBytesPushed = 0;
     m_IsBound = FALSE;
+    m_LeftGain = 1.0f;
+    m_RightGain = 1.0f;
     
     // Allocate ring buffer
     m_BufferSize = bytes;
@@ -201,8 +229,12 @@ CKBOOL SdlSoundSource::Initialize(SdlSoundManager *manager, CK_WAVESOUND_TYPE ty
     spec.format = SdlSoundManager::CKFormatToSDL(m_Format);
     spec.channels = m_Format.nChannels;
     spec.freq = m_Format.nSamplesPerSec;
+    streamSpec = spec;
+    if (streamSpec.channels == 1) {
+        streamSpec.channels = 2;
+    }
     
-    m_Stream = SDL_CreateAudioStream(&spec, &spec);
+    m_Stream = SDL_CreateAudioStream(&streamSpec, &streamSpec);
     if (!m_Stream) {
         Cleanup();
         return FALSE;
@@ -233,6 +265,153 @@ void SdlSoundSource::Cleanup()
     m_BufferSize = 0;
     m_Manager = NULL;
     m_TotalBytesPushed = 0;
+    m_LeftGain = 1.0f;
+    m_RightGain = 1.0f;
+}
+
+void SdlSoundSource::QueueAudioData(const void *data, CKDWORD bytes)
+{
+    CKBYTE *mixed;
+    CKDWORD i;
+    CKDWORD frameBytes;
+    CKDWORD mixedBytes;
+    Uint8 *u8;
+    const Uint8 *srcU8;
+    Sint16 *s16;
+    const Sint16 *srcS16;
+    Sint32 *s32;
+    const Sint32 *srcS32;
+
+    if (!m_Stream || !data || bytes == 0) return;
+
+    if (m_Format.nBlockAlign == 0 ||
+        (bytes % m_Format.nBlockAlign) != 0 ||
+        (m_Format.nChannels != 1 && m_Format.nChannels != 2) ||
+        (m_Format.wBitsPerSample != 8 && m_Format.wBitsPerSample != 16 && m_Format.wBitsPerSample != 32)) {
+        SDL_PutAudioStreamData(m_Stream, data, (int)bytes);
+        return;
+    }
+
+    if (m_Format.nChannels == 2 && m_LeftGain == 1.0f && m_RightGain == 1.0f) {
+        SDL_PutAudioStreamData(m_Stream, data, (int)bytes);
+        return;
+    }
+
+    mixedBytes = (m_Format.nChannels == 1) ? (bytes * 2) : bytes;
+    mixed = new CKBYTE[mixedBytes];
+    if (!mixed) {
+        SDL_PutAudioStreamData(m_Stream, data, (int)bytes);
+        return;
+    }
+
+    frameBytes = m_Format.nBlockAlign;
+
+    if (m_Format.nChannels == 1) {
+        switch (m_Format.wBitsPerSample) {
+            case 8:
+                srcU8 = (const Uint8 *)data;
+                u8 = (Uint8 *)mixed;
+                for (i = 0; i < bytes; ++i) {
+                    u8[i * 2] = (Uint8)ClampFloat(((float)((int)srcU8[i] - 128) * m_LeftGain) + 128.0f, 0.0f, 255.0f);
+                    u8[i * 2 + 1] = (Uint8)ClampFloat(((float)((int)srcU8[i] - 128) * m_RightGain) + 128.0f, 0.0f, 255.0f);
+                }
+                break;
+
+            case 16:
+                srcS16 = (const Sint16 *)data;
+                s16 = (Sint16 *)mixed;
+                for (i = 0; i < bytes / sizeof(Sint16); ++i) {
+                    s16[i * 2] = ClampSint16((float)srcS16[i] * m_LeftGain);
+                    s16[i * 2 + 1] = ClampSint16((float)srcS16[i] * m_RightGain);
+                }
+                break;
+
+            case 32:
+                srcS32 = (const Sint32 *)data;
+                s32 = (Sint32 *)mixed;
+                for (i = 0; i < bytes / sizeof(Sint32); ++i) {
+                    s32[i * 2] = ClampSint32((double)srcS32[i] * (double)m_LeftGain);
+                    s32[i * 2 + 1] = ClampSint32((double)srcS32[i] * (double)m_RightGain);
+                }
+                break;
+        }
+    } else {
+        memcpy(mixed, data, bytes);
+
+        switch (m_Format.wBitsPerSample) {
+            case 8:
+                for (i = 0; i < bytes; i += frameBytes) {
+                    u8 = (Uint8 *)(mixed + i);
+                    u8[0] = (Uint8)ClampFloat(((float)((int)u8[0] - 128) * m_LeftGain) + 128.0f, 0.0f, 255.0f);
+                    u8[1] = (Uint8)ClampFloat(((float)((int)u8[1] - 128) * m_RightGain) + 128.0f, 0.0f, 255.0f);
+                }
+                break;
+
+            case 16:
+                for (i = 0; i < bytes; i += frameBytes) {
+                    s16 = (Sint16 *)(mixed + i);
+                    s16[0] = ClampSint16((float)s16[0] * m_LeftGain);
+                    s16[1] = ClampSint16((float)s16[1] * m_RightGain);
+                }
+                break;
+
+            case 32:
+                for (i = 0; i < bytes; i += frameBytes) {
+                    s32 = (Sint32 *)(mixed + i);
+                    s32[0] = ClampSint32((double)s32[0] * (double)m_LeftGain);
+                    s32[1] = ClampSint32((double)s32[1] * (double)m_RightGain);
+                }
+                break;
+        }
+    }
+
+    SDL_PutAudioStreamData(m_Stream, mixed, (int)mixedBytes);
+    delete[] mixed;
+}
+
+int SdlSoundSource::GetQueuedSourceBytes() const
+{
+    int queuedBytes;
+
+    if (!m_Stream) return 0;
+
+    queuedBytes = SDL_GetAudioStreamQueued(m_Stream);
+    if (queuedBytes <= 0) return queuedBytes;
+
+    return (m_Format.nChannels == 1) ? (queuedBytes / 2) : queuedBytes;
+}
+
+void SdlSoundSource::RefreshQueuedAudio()
+{
+    Uint64 queued;
+    Uint64 consumed;
+    CKDWORD playPos;
+    CKDWORD tailBytes;
+    int queuedBytes;
+
+    if (m_IsStreamed || !m_IsPlaying || !m_Stream || !m_Buffer || m_BufferSize == 0) return;
+
+    queuedBytes = GetQueuedSourceBytes();
+    if (queuedBytes < 0) return;
+
+    queued = (Uint64)queuedBytes;
+    consumed = (m_TotalBytesPushed > queued) ? (m_TotalBytesPushed - queued) : 0;
+    playPos = (CKDWORD)((m_PlayPos + consumed) % m_BufferSize);
+
+    SDL_ClearAudioStream(m_Stream);
+    m_TotalBytesPushed = 0;
+    m_PlayPos = playPos;
+
+    tailBytes = m_BufferSize - playPos;
+    if (tailBytes > 0) {
+        QueueAudioData(m_Buffer + playPos, tailBytes);
+        m_TotalBytesPushed += tailBytes;
+    }
+    if (m_IsLooping && playPos > 0) {
+        QueueAudioData(m_Buffer, playPos);
+        m_TotalBytesPushed += playPos;
+    }
+    SDL_FlushAudioStream(m_Stream);
 }
 
 void SdlSoundSource::ApplySettings()
