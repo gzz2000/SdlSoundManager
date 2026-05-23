@@ -416,24 +416,35 @@ void SdlSoundSource::RefreshQueuedAudio()
 
 void SdlSoundSource::ApplySettings()
 {
+    float oldLeftGain, oldRightGain;
+    float pan;
+    float pitch;
+
     if (!m_Stream) return;
 
-    SDL_SetAudioStreamFrequencyRatio(m_Stream, m_Settings.m_Pitch);
+    oldLeftGain = m_LeftGain;
+    oldRightGain = m_RightGain;
+
+    pitch = m_Settings.m_Pitch;
+    if (pitch <= 0.0f) pitch = 1.0f;
+    SDL_SetAudioStreamFrequencyRatio(m_Stream, pitch);
 
     // Base gain; 3D attenuation (if any) is applied in Apply3DSettings.
     SDL_SetAudioStreamGain(m_Stream, m_Settings.m_Gain);
 
-    // Minimal pan support: hard-mute one channel at extremes.
-    if (m_Type == CK_WAVESOUND_BACKGROUND && m_Format.nChannels == 2) {
-        if (m_Settings.m_Pan <= -0.99f) {
-            const int map[2] = { 0, -1 };
-            SDL_SetAudioStreamOutputChannelMap(m_Stream, map, 2);
-        } else if (m_Settings.m_Pan >= 0.99f) {
-            const int map[2] = { -1, 1 };
-            SDL_SetAudioStreamOutputChannelMap(m_Stream, map, 2);
-        } else {
-            SDL_SetAudioStreamOutputChannelMap(m_Stream, NULL, 0);
-        }
+    if (m_Type == CK_WAVESOUND_BACKGROUND &&
+        (m_Format.nChannels == 1 || m_Format.nChannels == 2)) {
+        pan = ClampFloat(m_Settings.m_Pan, -1.0f, 1.0f);
+        m_LeftGain = (pan > 0.0f) ? (1.0f - pan) : 1.0f;
+        m_RightGain = (pan < 0.0f) ? (1.0f + pan) : 1.0f;
+    } else if (m_Type == CK_WAVESOUND_BACKGROUND) {
+        m_LeftGain = 1.0f;
+        m_RightGain = 1.0f;
+    }
+
+    if (fabsf(oldLeftGain - m_LeftGain) > 0.01f ||
+        fabsf(oldRightGain - m_RightGain) > 0.01f) {
+        RefreshQueuedAudio();
     }
 }
 
