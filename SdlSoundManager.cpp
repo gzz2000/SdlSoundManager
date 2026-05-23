@@ -22,6 +22,9 @@
 #define max(a,b) (((a) > (b)) ? (a) : (b))
 #endif
 
+#define SDL_SOUND_PI        3.14159265358979323846f
+#define SDL_SOUND_SPEED     343.3f
+
 //-----------------------------------------------------------------------------
 // Plugin Entry Points
 //-----------------------------------------------------------------------------
@@ -452,19 +455,40 @@ void SdlSoundSource::Apply3DSettings(const CKListenerSettings &listener)
 {
     VxVector relative;
     VxVector listenerPosition;
+    VxVector listenerVelocity;
+    VxVector listenerRight;
+    VxVector dirToSource;
+    VxVector toListener;
+    VxVector coneDir;
     float distance, attenuation;
     float px, py, pz;
     float range, dist_from_min;
+    float len, invLen;
+    float pan;
+    float coneGain;
+    float dot, angle;
+    float inAngle, outAngle, angleRange;
+    float speed, numer, denom;
+    float sourceToward, listenerTowardSource;
+    float doppler, pitch;
+    float oldLeftGain, oldRightGain;
 
     if (!m_Stream) return;
     
     // Only apply 3D for non-background sounds
     if (m_Type == CK_WAVESOUND_BACKGROUND) return;
 
+    oldLeftGain = m_LeftGain;
+    oldRightGain = m_RightGain;
+
     listenerPosition.Set(0.0f, 0.0f, 0.0f);
+    listenerVelocity.Set(0.0f, 0.0f, 0.0f);
+    listenerRight.Set(1.0f, 0.0f, 0.0f);
 
     if (m_Manager) {
         listenerPosition = m_Manager->m_LastListenerPosition;
+        listenerVelocity = m_Manager->m_LastListenerVelocity;
+        listenerRight = m_Manager->m_LastListenerRight;
     }
 
     if (m_3DSettings.m_HeadRelative) {
@@ -495,9 +519,76 @@ void SdlSoundSource::Apply3DSettings(const CKListenerSettings &listener)
         attenuation = 1.0f - (dist_from_min / range) * listener.m_RollOff;
         if (attenuation < 0.0f) attenuation = 0.0f;
     }
-    
+
+    coneGain = 1.0f;
+    len = m_3DSettings.m_OrientationDir.SquareMagnitude();
+    if (len > 0.000001f && distance > 0.000001f && m_3DSettings.m_OutAngle < 360.0f) {
+        coneDir = m_3DSettings.m_OrientationDir;
+        coneDir *= 1.0f / sqrtf(len);
+
+        toListener.Set(-relative.x, -relative.y, -relative.z);
+        toListener.Normalize();
+
+        dot = ClampFloat(DotProduct(coneDir, toListener), -1.0f, 1.0f);
+        angle = acosf(dot) * 180.0f / SDL_SOUND_PI;
+        inAngle = m_3DSettings.m_InAngle * 0.5f;
+        outAngle = m_3DSettings.m_OutAngle * 0.5f;
+
+        if (outAngle < inAngle) outAngle = inAngle;
+
+        if (angle >= outAngle) {
+            coneGain = ClampFloat(m_3DSettings.m_OutsideGain, 0.0f, 1.0f);
+        } else if (angle > inAngle) {
+            angleRange = outAngle - inAngle;
+            if (angleRange > 0.000001f) {
+                coneGain = 1.0f - ((angle - inAngle) / angleRange) *
+                           (1.0f - ClampFloat(m_3DSettings.m_OutsideGain, 0.0f, 1.0f));
+            }
+        }
+    }
+
+    pan = 0.0f;
+    len = relative.SquareMagnitude();
+    if (len > 0.000001f) {
+        invLen = 1.0f / sqrtf(len);
+        dirToSource = relative * invLen;
+        if (m_3DSettings.m_HeadRelative) {
+            pan = ClampFloat(dirToSource.x, -1.0f, 1.0f);
+        } else {
+            listenerRight.Normalize();
+            pan = ClampFloat(DotProduct(dirToSource, listenerRight), -1.0f, 1.0f);
+        }
+    }
+    m_LeftGain = (pan > 0.0f) ? (1.0f - pan) : 1.0f;
+    m_RightGain = (pan < 0.0f) ? (1.0f + pan) : 1.0f;
+    if (fabsf(oldLeftGain - m_LeftGain) > 0.01f ||
+        fabsf(oldRightGain - m_RightGain) > 0.01f) {
+        RefreshQueuedAudio();
+    }
+
+    doppler = 1.0f;
+    if (listener.m_DopplerFactor != 0.0f && len > 0.000001f) {
+        toListener.Set(-dirToSource.x, -dirToSource.y, -dirToSource.z);
+        sourceToward = DotProduct(m_3DSettings.m_Velocity, toListener);
+        listenerTowardSource = m_3DSettings.m_HeadRelative ? 0.0f : DotProduct(listenerVelocity, dirToSource);
+        speed = SDL_SOUND_SPEED;
+        if (listener.m_DistanceFactor > 0.000001f) {
+            speed /= listener.m_DistanceFactor;
+        }
+
+        numer = speed + listenerTowardSource * listener.m_DopplerFactor;
+        denom = speed - sourceToward * listener.m_DopplerFactor;
+        if (denom < speed * 0.1f) denom = speed * 0.1f;
+        if (numer < speed * 0.1f) numer = speed * 0.1f;
+        doppler = ClampFloat(numer / denom, 0.5f, 2.0f);
+    }
+
+    pitch = m_Settings.m_Pitch * doppler;
+    if (pitch <= 0.0f) pitch = 1.0f;
+    SDL_SetAudioStreamFrequencyRatio(m_Stream, pitch);
+
     // Apply attenuation via per-stream gain (global gain handled at device)
-    SDL_SetAudioStreamGain(m_Stream, m_Settings.m_Gain * attenuation);
+    SDL_SetAudioStreamGain(m_Stream, m_Settings.m_Gain * attenuation * coneGain);
 }
 
 //-----------------------------------------------------------------------------
@@ -958,7 +1049,7 @@ CKERROR SdlSoundManager::Lock(void *source, CKDWORD dwWriteCursor, CKDWORD dwNum
     } else {
         startPos = dwWriteCursor % bufferSize;
     }
-    
+
     // Calculate how many bytes until end of buffer
     bytesToEnd = bufferSize - startPos;
     audioBytes1 = min(requestedBytes, bytesToEnd);
@@ -1418,6 +1509,7 @@ CKERROR SdlSoundManager::PostProcess()
     LockMutex();
     
     deltaTime = m_Context->GetTimeManager()->GetLastDeltaTime();
+
     listener = GetListener();
     if (listener) {
         mat = &listener->GetWorldMatrix();
