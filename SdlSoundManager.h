@@ -206,9 +206,11 @@ struct SdlSoundSource
     // Reference to parent manager
     SdlSoundManager *m_Manager;
 
-    // Software stereo panning state
-    float m_LeftGain;
-    float m_RightGain;
+    // Software stereo panning matrix
+    float m_LeftToLeftGain;
+    float m_LeftToRightGain;
+    float m_RightToLeftGain;
+    float m_RightToRightGain;
     
     SdlSoundSource();
     ~SdlSoundSource();

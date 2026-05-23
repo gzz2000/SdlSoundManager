@@ -62,6 +62,15 @@ static Sint32 ClampSint32(double value)
     return (Sint32)value;
 }
 
+static CKBOOL MixMatrixChanged(float oldLL, float oldLR, float oldRL, float oldRR,
+                               float newLL, float newLR, float newRL, float newRR)
+{
+    return fabsf(oldLL - newLL) > 0.01f ||
+           fabsf(oldLR - newLR) > 0.01f ||
+           fabsf(oldRL - newRL) > 0.01f ||
+           fabsf(oldRR - newRR) > 0.01f;
+}
+
 CKERROR CreateSdlSoundManager(CKContext *context)
 {
     if (!context) return CKERR_INVALIDPARAMETER;
@@ -165,8 +174,10 @@ SdlSoundSource::SdlSoundSource()
     m_Manager = NULL;
     m_TotalBytesPushed = 0;
     m_IsBound = FALSE;
-    m_LeftGain = 1.0f;
-    m_RightGain = 1.0f;
+    m_LeftToLeftGain = 1.0f;
+    m_LeftToRightGain = 0.0f;
+    m_RightToLeftGain = 0.0f;
+    m_RightToRightGain = 1.0f;
     
     memset(&m_Format, 0, sizeof(CKWaveFormat));
     m_Format.wFormatTag = CKWAVE_FORMAT_PCM;
@@ -189,8 +200,10 @@ void SdlSoundSource::Reset()
     m_IsPlaying = FALSE;
     m_IsPaused = FALSE;
     m_TotalBytesPushed = 0;
-    m_LeftGain = 1.0f;
-    m_RightGain = 1.0f;
+    m_LeftToLeftGain = 1.0f;
+    m_LeftToRightGain = 0.0f;
+    m_RightToLeftGain = 0.0f;
+    m_RightToRightGain = 1.0f;
     
     if (m_Buffer && m_BufferSize > 0) {
         memset(m_Buffer, 0, m_BufferSize);
@@ -213,8 +226,10 @@ CKBOOL SdlSoundSource::Initialize(SdlSoundManager *manager, CK_WAVESOUND_TYPE ty
     memcpy(&m_Format, wf, sizeof(CKWaveFormat));
     m_TotalBytesPushed = 0;
     m_IsBound = FALSE;
-    m_LeftGain = 1.0f;
-    m_RightGain = 1.0f;
+    m_LeftToLeftGain = 1.0f;
+    m_LeftToRightGain = 0.0f;
+    m_RightToLeftGain = 0.0f;
+    m_RightToRightGain = 1.0f;
     
     // Allocate ring buffer
     m_BufferSize = bytes;
@@ -268,8 +283,10 @@ void SdlSoundSource::Cleanup()
     m_BufferSize = 0;
     m_Manager = NULL;
     m_TotalBytesPushed = 0;
-    m_LeftGain = 1.0f;
-    m_RightGain = 1.0f;
+    m_LeftToLeftGain = 1.0f;
+    m_LeftToRightGain = 0.0f;
+    m_RightToLeftGain = 0.0f;
+    m_RightToRightGain = 1.0f;
 }
 
 void SdlSoundSource::QueueAudioData(const void *data, CKDWORD bytes)
@@ -284,6 +301,10 @@ void SdlSoundSource::QueueAudioData(const void *data, CKDWORD bytes)
     const Sint16 *srcS16;
     Sint32 *s32;
     const Sint32 *srcS32;
+    float leftSample;
+    float rightSample;
+    double leftWide;
+    double rightWide;
 
     if (!m_Stream || !data || bytes == 0) return;
 
@@ -295,7 +316,9 @@ void SdlSoundSource::QueueAudioData(const void *data, CKDWORD bytes)
         return;
     }
 
-    if (m_Format.nChannels == 2 && m_LeftGain == 1.0f && m_RightGain == 1.0f) {
+    if (m_Format.nChannels == 2 &&
+        m_LeftToLeftGain == 1.0f && m_LeftToRightGain == 0.0f &&
+        m_RightToLeftGain == 0.0f && m_RightToRightGain == 1.0f) {
         SDL_PutAudioStreamData(m_Stream, data, (int)bytes);
         return;
     }
@@ -315,8 +338,9 @@ void SdlSoundSource::QueueAudioData(const void *data, CKDWORD bytes)
                 srcU8 = (const Uint8 *)data;
                 u8 = (Uint8 *)mixed;
                 for (i = 0; i < bytes; ++i) {
-                    u8[i * 2] = (Uint8)ClampFloat(((float)((int)srcU8[i] - 128) * m_LeftGain) + 128.0f, 0.0f, 255.0f);
-                    u8[i * 2 + 1] = (Uint8)ClampFloat(((float)((int)srcU8[i] - 128) * m_RightGain) + 128.0f, 0.0f, 255.0f);
+                    leftSample = (float)((int)srcU8[i] - 128);
+                    u8[i * 2] = (Uint8)ClampFloat(leftSample * m_LeftToLeftGain + 128.0f, 0.0f, 255.0f);
+                    u8[i * 2 + 1] = (Uint8)ClampFloat(leftSample * m_LeftToRightGain + 128.0f, 0.0f, 255.0f);
                 }
                 break;
 
@@ -324,8 +348,9 @@ void SdlSoundSource::QueueAudioData(const void *data, CKDWORD bytes)
                 srcS16 = (const Sint16 *)data;
                 s16 = (Sint16 *)mixed;
                 for (i = 0; i < bytes / sizeof(Sint16); ++i) {
-                    s16[i * 2] = ClampSint16((float)srcS16[i] * m_LeftGain);
-                    s16[i * 2 + 1] = ClampSint16((float)srcS16[i] * m_RightGain);
+                    leftSample = (float)srcS16[i];
+                    s16[i * 2] = ClampSint16(leftSample * m_LeftToLeftGain);
+                    s16[i * 2 + 1] = ClampSint16(leftSample * m_LeftToRightGain);
                 }
                 break;
 
@@ -333,8 +358,9 @@ void SdlSoundSource::QueueAudioData(const void *data, CKDWORD bytes)
                 srcS32 = (const Sint32 *)data;
                 s32 = (Sint32 *)mixed;
                 for (i = 0; i < bytes / sizeof(Sint32); ++i) {
-                    s32[i * 2] = ClampSint32((double)srcS32[i] * (double)m_LeftGain);
-                    s32[i * 2 + 1] = ClampSint32((double)srcS32[i] * (double)m_RightGain);
+                    leftWide = (double)srcS32[i];
+                    s32[i * 2] = ClampSint32(leftWide * (double)m_LeftToLeftGain);
+                    s32[i * 2 + 1] = ClampSint32(leftWide * (double)m_LeftToRightGain);
                 }
                 break;
         }
@@ -345,24 +371,36 @@ void SdlSoundSource::QueueAudioData(const void *data, CKDWORD bytes)
             case 8:
                 for (i = 0; i < bytes; i += frameBytes) {
                     u8 = (Uint8 *)(mixed + i);
-                    u8[0] = (Uint8)ClampFloat(((float)((int)u8[0] - 128) * m_LeftGain) + 128.0f, 0.0f, 255.0f);
-                    u8[1] = (Uint8)ClampFloat(((float)((int)u8[1] - 128) * m_RightGain) + 128.0f, 0.0f, 255.0f);
+                    leftSample = (float)((int)u8[0] - 128);
+                    rightSample = (float)((int)u8[1] - 128);
+                    u8[0] = (Uint8)ClampFloat(leftSample * m_LeftToLeftGain +
+                                               rightSample * m_RightToLeftGain + 128.0f, 0.0f, 255.0f);
+                    u8[1] = (Uint8)ClampFloat(leftSample * m_LeftToRightGain +
+                                               rightSample * m_RightToRightGain + 128.0f, 0.0f, 255.0f);
                 }
                 break;
 
             case 16:
                 for (i = 0; i < bytes; i += frameBytes) {
                     s16 = (Sint16 *)(mixed + i);
-                    s16[0] = ClampSint16((float)s16[0] * m_LeftGain);
-                    s16[1] = ClampSint16((float)s16[1] * m_RightGain);
+                    leftSample = (float)s16[0];
+                    rightSample = (float)s16[1];
+                    s16[0] = ClampSint16(leftSample * m_LeftToLeftGain +
+                                         rightSample * m_RightToLeftGain);
+                    s16[1] = ClampSint16(leftSample * m_LeftToRightGain +
+                                         rightSample * m_RightToRightGain);
                 }
                 break;
 
             case 32:
                 for (i = 0; i < bytes; i += frameBytes) {
                     s32 = (Sint32 *)(mixed + i);
-                    s32[0] = ClampSint32((double)s32[0] * (double)m_LeftGain);
-                    s32[1] = ClampSint32((double)s32[1] * (double)m_RightGain);
+                    leftWide = (double)s32[0];
+                    rightWide = (double)s32[1];
+                    s32[0] = ClampSint32(leftWide * (double)m_LeftToLeftGain +
+                                         rightWide * (double)m_RightToLeftGain);
+                    s32[1] = ClampSint32(leftWide * (double)m_LeftToRightGain +
+                                         rightWide * (double)m_RightToRightGain);
                 }
                 break;
         }
@@ -439,14 +477,17 @@ void SdlSoundSource::RefreshQueuedAudio()
 
 void SdlSoundSource::ApplySettings()
 {
-    float oldLeftGain, oldRightGain;
+    float oldLL, oldLR, oldRL, oldRR;
+    float leftGain, rightGain;
     float pan;
     float pitch;
 
     if (!m_Stream) return;
 
-    oldLeftGain = m_LeftGain;
-    oldRightGain = m_RightGain;
+    oldLL = m_LeftToLeftGain;
+    oldLR = m_LeftToRightGain;
+    oldRL = m_RightToLeftGain;
+    oldRR = m_RightToRightGain;
 
     pitch = m_Settings.m_Pitch;
     if (pitch <= 0.0f) pitch = 1.0f;
@@ -458,15 +499,22 @@ void SdlSoundSource::ApplySettings()
     if (m_Type == CK_WAVESOUND_BACKGROUND &&
         (m_Format.nChannels == 1 || m_Format.nChannels == 2)) {
         pan = ClampFloat(m_Settings.m_Pan, -1.0f, 1.0f);
-        m_LeftGain = (pan > 0.0f) ? (1.0f - pan) : 1.0f;
-        m_RightGain = (pan < 0.0f) ? (1.0f + pan) : 1.0f;
+        leftGain = (pan > 0.0f) ? (1.0f - pan) : 1.0f;
+        rightGain = (pan < 0.0f) ? (1.0f + pan) : 1.0f;
+        m_LeftToLeftGain = leftGain;
+        m_LeftToRightGain = (m_Format.nChannels == 1) ? rightGain : 0.0f;
+        m_RightToLeftGain = 0.0f;
+        m_RightToRightGain = (m_Format.nChannels == 2) ? rightGain : 0.0f;
     } else if (m_Type == CK_WAVESOUND_BACKGROUND) {
-        m_LeftGain = 1.0f;
-        m_RightGain = 1.0f;
+        m_LeftToLeftGain = 1.0f;
+        m_LeftToRightGain = 0.0f;
+        m_RightToLeftGain = 0.0f;
+        m_RightToRightGain = 1.0f;
     }
 
-    if (fabsf(oldLeftGain - m_LeftGain) > 0.01f ||
-        fabsf(oldRightGain - m_RightGain) > 0.01f) {
+    if (MixMatrixChanged(oldLL, oldLR, oldRL, oldRR,
+                         m_LeftToLeftGain, m_LeftToRightGain,
+                         m_RightToLeftGain, m_RightToRightGain)) {
         RefreshQueuedAudio();
     }
 }
@@ -493,15 +541,18 @@ void SdlSoundSource::Apply3DSettings(const CKListenerSettings &listener)
     float speed, numer, denom;
     float sourceToward, listenerTowardSource;
     float doppler, pitch;
-    float oldLeftGain, oldRightGain;
+    float oldLL, oldLR, oldRL, oldRR;
+    float leftGain, rightGain;
 
     if (!m_Stream) return;
     
     // Only apply 3D for non-background sounds
     if (m_Type == CK_WAVESOUND_BACKGROUND) return;
 
-    oldLeftGain = m_LeftGain;
-    oldRightGain = m_RightGain;
+    oldLL = m_LeftToLeftGain;
+    oldLR = m_LeftToRightGain;
+    oldRL = m_RightToLeftGain;
+    oldRR = m_RightToRightGain;
 
     listenerPosition.Set(0.0f, 0.0f, 0.0f);
     listenerVelocity.Set(0.0f, 0.0f, 0.0f);
@@ -585,10 +636,15 @@ void SdlSoundSource::Apply3DSettings(const CKListenerSettings &listener)
             }
         }
     }
-    m_LeftGain = (pan > 0.0f) ? (1.0f - pan) : 1.0f;
-    m_RightGain = (pan < 0.0f) ? (1.0f + pan) : 1.0f;
-    if (fabsf(oldLeftGain - m_LeftGain) > 0.01f ||
-        fabsf(oldRightGain - m_RightGain) > 0.01f) {
+    leftGain = (pan > 0.0f) ? (1.0f - pan) : 1.0f;
+    rightGain = (pan < 0.0f) ? (1.0f + pan) : 1.0f;
+    m_LeftToLeftGain = leftGain;
+    m_LeftToRightGain = (m_Format.nChannels == 1) ? rightGain : 0.0f;
+    m_RightToLeftGain = 0.0f;
+    m_RightToRightGain = (m_Format.nChannels == 2) ? rightGain : 0.0f;
+    if (MixMatrixChanged(oldLL, oldLR, oldRL, oldRR,
+                         m_LeftToLeftGain, m_LeftToRightGain,
+                         m_RightToLeftGain, m_RightToRightGain)) {
         RefreshQueuedAudio();
     }
 
