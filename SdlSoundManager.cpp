@@ -560,6 +560,14 @@ void SdlSoundManager::SetPlayPosition(void *source, int pos)
     sdlSource = (SdlSoundSource*)source;
     sdlSource->m_PlayPos = (CKDWORD)pos;
 
+    if (sdlSource->m_IsStreamed && sdlSource->m_Stream) {
+        SDL_ClearAudioStream(sdlSource->m_Stream);
+        sdlSource->m_TotalBytesPushed = 0;
+        sdlSource->m_PlayPos = 0;
+        sdlSource->m_WritePos = 0;
+        return;
+    }
+
     if (!sdlSource->m_IsStreamed && sdlSource->m_Stream && sdlSource->m_IsPlaying) {
         SDL_ClearAudioStream(sdlSource->m_Stream);
         sdlSource->m_TotalBytesPushed = 0;
@@ -581,21 +589,24 @@ void SdlSoundManager::SetPlayPosition(void *source, int pos)
 int SdlSoundManager::GetPlayPosition(void *source)
 {
     SdlSoundSource *sdlSource;
+    Uint64 queued;
+    Uint64 consumed;
+    int queuedBytes;
     
     if (!ValidateSource(source)) return 0;
     
     sdlSource = (SdlSoundSource*)source;
 
     if (sdlSource->m_Stream) {
-        const int queued = SDL_GetAudioStreamQueued(sdlSource->m_Stream);
-        if (queued >= 0) {
-            const Uint64 q = (Uint64)queued;
-            const Uint64 consumed = (sdlSource->m_TotalBytesPushed > q) ? (sdlSource->m_TotalBytesPushed - q) : 0;
+        queuedBytes = SDL_GetAudioStreamQueued(sdlSource->m_Stream);
+        if (queuedBytes >= 0) {
+            queued = (Uint64)queuedBytes;
+            consumed = (sdlSource->m_TotalBytesPushed > queued) ? (sdlSource->m_TotalBytesPushed - queued) : 0;
 
-            if (!sdlSource->m_IsStreamed && sdlSource->m_BufferSize > 0) {
-                return (int)(consumed % sdlSource->m_BufferSize);
+            if (sdlSource->m_BufferSize > 0) {
+                return (int)((sdlSource->m_PlayPos + consumed) % sdlSource->m_BufferSize);
             }
-            return (int)consumed;
+            return sdlSource->m_IsStreamed ? 0 : (int)consumed;
         }
     }
 
@@ -701,6 +712,9 @@ CKERROR SdlSoundManager::Lock(void *source, CKDWORD dwWriteCursor, CKDWORD dwNum
     SdlSoundSource *sdlSource;
     CKDWORD bufferSize;
     CKDWORD startPos;
+    CKDWORD audioBytes1;
+    CKDWORD audioBytes2;
+    CKDWORD requestedBytes;
     CKDWORD bytesToEnd;
     
     if (!ValidateSource(source) || !pvAudioPtr1 || !dwAudioBytes1) {
@@ -714,9 +728,15 @@ CKERROR SdlSoundManager::Lock(void *source, CKDWORD dwWriteCursor, CKDWORD dwNum
     }
     
     bufferSize = sdlSource->m_BufferSize;
+    requestedBytes = (dwFlags & CK_WAVESOUND_LOCKENTIREBUFFER) ? bufferSize : dwNumBytes;
+
+    if (requestedBytes > bufferSize) {
+        return CKERR_INVALIDSIZE;
+    }
     
-    // Handle lock from write cursor flag
-    if (dwFlags & CK_WAVESOUND_LOCKFROMWRITE) {
+    if (dwFlags & CK_WAVESOUND_LOCKENTIREBUFFER) {
+        startPos = 0;
+    } else if (dwFlags & CK_WAVESOUND_LOCKFROMWRITE) {
         startPos = sdlSource->m_WritePos;
     } else {
         startPos = dwWriteCursor % bufferSize;
@@ -724,23 +744,21 @@ CKERROR SdlSoundManager::Lock(void *source, CKDWORD dwWriteCursor, CKDWORD dwNum
     
     // Calculate how many bytes until end of buffer
     bytesToEnd = bufferSize - startPos;
-    
-    if (dwNumBytes <= bytesToEnd) {
-        // No wrap needed
-        *pvAudioPtr1 = sdlSource->m_Buffer + startPos;
-        *dwAudioBytes1 = dwNumBytes;
-        
-        if (pvAudioPtr2) *pvAudioPtr2 = NULL;
-        if (dwAudioBytes2) *dwAudioBytes2 = 0;
-    } else {
-        // Wrap around needed
-        *pvAudioPtr1 = sdlSource->m_Buffer + startPos;
-        *dwAudioBytes1 = bytesToEnd;
-        
-        if (pvAudioPtr2 && dwAudioBytes2) {
-            *pvAudioPtr2 = sdlSource->m_Buffer;
-            *dwAudioBytes2 = dwNumBytes - bytesToEnd;
-        }
+    audioBytes1 = min(requestedBytes, bytesToEnd);
+    audioBytes2 = requestedBytes - audioBytes1;
+
+    if (audioBytes2 > 0 && (!pvAudioPtr2 || !dwAudioBytes2)) {
+        return CKERR_INVALIDPARAMETER;
+    }
+
+    *pvAudioPtr1 = sdlSource->m_Buffer + startPos;
+    *dwAudioBytes1 = audioBytes1;
+
+    if (pvAudioPtr2) {
+        *pvAudioPtr2 = audioBytes2 ? sdlSource->m_Buffer : NULL;
+    }
+    if (dwAudioBytes2) {
+        *dwAudioBytes2 = audioBytes2;
     }
     
     return CK_OK;
