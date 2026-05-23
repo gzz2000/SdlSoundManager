@@ -485,6 +485,7 @@ void SdlSoundSource::Apply3DSettings(const CKListenerSettings &listener)
     float minDistance, maxDistance;
     float rolloff, clampedDistance;
     float len, invLen;
+    float rightLen;
     float pan;
     float coneGain;
     float dot, angle;
@@ -577,8 +578,11 @@ void SdlSoundSource::Apply3DSettings(const CKListenerSettings &listener)
         if (m_3DSettings.m_HeadRelative) {
             pan = ClampFloat(dirToSource.x, -1.0f, 1.0f);
         } else {
-            listenerRight.Normalize();
-            pan = ClampFloat(DotProduct(dirToSource, listenerRight), -1.0f, 1.0f);
+            rightLen = listenerRight.SquareMagnitude();
+            if (rightLen > 0.000001f) {
+                listenerRight *= 1.0f / sqrtf(rightLen);
+                pan = ClampFloat(DotProduct(dirToSource, listenerRight), -1.0f, 1.0f);
+            }
         }
     }
     m_LeftGain = (pan > 0.0f) ? (1.0f - pan) : 1.0f;
