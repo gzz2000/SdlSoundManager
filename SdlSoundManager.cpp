@@ -493,6 +493,8 @@ SdlSoundManager::SdlSoundManager(CKContext *Context)
     m_bInitialized = FALSE;
     m_Mutex = NULL;
     m_LastListenerPosition.Set(0.0f, 0.0f, 0.0f);
+    m_LastListenerVelocity.Set(0.0f, 0.0f, 0.0f);
+    m_LastListenerRight.Set(1.0f, 0.0f, 0.0f);
     
     m_Mutex = SDL_CreateMutex();
     m_Context->RegisterNewManager(this);
@@ -1209,9 +1211,9 @@ void SdlSoundManager::UpdateListenerSettings(CK_SOUNDMANAGER_CAPS settingsoption
 
 void SdlSoundManager::PositionSource(SdlSoundSource *source, CK3dEntity *ent, 
                                      const VxVector &position, const VxVector &direction, 
-                                     VxVector &oldpos)
+                                     VxVector &oldpos, float deltaTime)
 {
-    VxVector pos, vel;
+    VxVector pos, vel, dir;
 
     if (!source) return;
     
@@ -1222,11 +1224,22 @@ void SdlSoundManager::PositionSource(SdlSoundSource *source, CK3dEntity *ent,
     }
     
     // Calculate velocity
-    vel = pos - oldpos;
+    if (deltaTime > 0.0f) {
+        vel = (pos - oldpos) / (deltaTime * 0.001f);
+    } else {
+        vel.Set(0.0f, 0.0f, 0.0f);
+    }
+
+    // Calculate orientation
+    dir = direction;
+    if (ent) {
+        ent->TransformVector(&dir, &direction);
+    }
     
     // Update 3D position in source settings
     source->m_3DSettings.m_Position = pos;
     source->m_3DSettings.m_Velocity = vel;
+    source->m_3DSettings.m_OrientationDir = dir;
 
     source->Apply3DSettings(m_ListenerSettings);
     
@@ -1367,7 +1380,6 @@ void SdlSoundManager::StopAllPlayingSounds()
 CKERROR SdlSoundManager::PostProcess()
 {
     float deltaTime;
-    CKBOOL somethingIsPlayingIn3D;
     CK_ID *it;
     CKWaveSound *ws;
     SoundMinion **itm;
@@ -1376,14 +1388,30 @@ CKERROR SdlSoundManager::PostProcess()
     CK3dEntity *listener;
     const VxMatrix *mat;
     const VxVector4 *pos;
-    VxVector velocity;
+    const VxVector4 *right;
     
     if (!ValidateMixer()) return CK_OK;
     
     LockMutex();
     
     deltaTime = m_Context->GetTimeManager()->GetLastDeltaTime();
-    somethingIsPlayingIn3D = FALSE;
+    listener = GetListener();
+    if (listener) {
+        mat = &listener->GetWorldMatrix();
+        right = &(*mat)[0];
+        pos = &(*mat)[3];
+        if (deltaTime > 0.0f) {
+            m_LastListenerVelocity.Set((pos->x - m_LastListenerPosition.x) / (deltaTime * 0.001f),
+                                       (pos->y - m_LastListenerPosition.y) / (deltaTime * 0.001f),
+                                       (pos->z - m_LastListenerPosition.z) / (deltaTime * 0.001f));
+        } else {
+            m_LastListenerVelocity.Set(0.0f, 0.0f, 0.0f);
+        }
+        m_LastListenerRight.Set(right->x, right->y, right->z);
+        m_LastListenerPosition.Set(pos->x, pos->y, pos->z);
+    } else {
+        m_LastListenerVelocity.Set(0.0f, 0.0f, 0.0f);
+    }
 
     // Update playing sounds
     for (it = m_SoundsPlaying.Begin(); it != m_SoundsPlaying.End();) {
@@ -1400,7 +1428,6 @@ CKERROR SdlSoundManager::PostProcess()
 
             // Update 3D position
             if (!(ws->GetType() & CK_WAVESOUND_BACKGROUND)) {
-                somethingIsPlayingIn3D = TRUE;
                 ws->UpdatePosition(deltaTime);
             }
 
@@ -1413,32 +1440,15 @@ CKERROR SdlSoundManager::PostProcess()
     // Update minions
     for (itm = m_Minions.Begin(); itm != m_Minions.End(); ++itm) {
         if (IsPlaying((*itm)->m_Source)) {
-            somethingIsPlayingIn3D = TRUE;
             source = (SdlSoundSource*)(*itm)->m_Source;
             
             if ((*itm)->m_Entity) {
                 ent = (CK3dEntity*)m_Context->GetObject((*itm)->m_Entity);
                 if (ent && source) {
                     PositionSource(source, ent, (*itm)->m_Position, 
-                                  (*itm)->m_Direction, (*itm)->m_OldPosition);
+                                  (*itm)->m_Direction, (*itm)->m_OldPosition, deltaTime);
                 }
             }
-        }
-    }
-
-    // Update listener if something is playing in 3D
-    if (somethingIsPlayingIn3D) {
-        listener = GetListener();
-        if (listener) {
-            mat = &listener->GetWorldMatrix();
-            pos = &(*mat)[3];
-            
-            velocity = VxVector(pos->x, pos->y, pos->z) - m_LastListenerPosition;
-            m_LastListenerPosition.Set(pos->x, pos->y, pos->z);
-            
-            // SDL_mixer doesn't have a listener position API (listener is always at origin)
-            // So we need to update all 3D sources relative to listener position
-            // This is handled in the 3D source position updates above
         }
     }
 

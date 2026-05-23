@@ -109,7 +109,7 @@ protected:
     // Source positioning for 3D audio
     void PositionSource(SdlSoundSource *source, CK3dEntity *ent, 
                        const VxVector &position, const VxVector &direction, 
-                       VxVector &oldpos);
+                       VxVector &oldpos, float deltaTime);
     
     // Resource validation
     CKBOOL ValidateSource(void *source) const;
@@ -138,6 +138,8 @@ private:
     // Internal state
     CKBOOL m_bInitialized;
     VxVector m_LastListenerPosition;
+    VxVector m_LastListenerVelocity;
+    VxVector m_LastListenerRight;
     
     // Listener settings (cached)
     CKListenerSettings m_ListenerSettings;
