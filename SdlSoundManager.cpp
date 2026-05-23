@@ -71,6 +71,16 @@ static CKBOOL MixMatrixChanged(float oldLL, float oldLR, float oldRL, float oldR
            fabsf(oldRR - newRR) > 0.01f;
 }
 
+static void NormalizeOrDefault(VxVector &value, float x, float y, float z)
+{
+    float len = value.SquareMagnitude();
+    if (len > 0.000001f) {
+        value *= 1.0f / sqrtf(len);
+    } else {
+        value.Set(x, y, z);
+    }
+}
+
 CKERROR CreateSdlSoundManager(CKContext *context)
 {
     if (!context) return CKERR_INVALIDPARAMETER;
@@ -525,6 +535,11 @@ void SdlSoundSource::Apply3DSettings(const CKListenerSettings &listener)
     VxVector listenerPosition;
     VxVector listenerVelocity;
     VxVector listenerRight;
+    VxVector listenerUp;
+    VxVector listenerForward;
+    VxVector sourceVelocity;
+    VxVector sourceDirection;
+    VxVector worldRelative;
     VxVector dirToSource;
     VxVector toListener;
     VxVector coneDir;
@@ -533,7 +548,6 @@ void SdlSoundSource::Apply3DSettings(const CKListenerSettings &listener)
     float minDistance, maxDistance;
     float rolloff, clampedDistance;
     float len, invLen;
-    float rightLen;
     float pan;
     float coneGain;
     float dot, angle;
@@ -557,17 +571,40 @@ void SdlSoundSource::Apply3DSettings(const CKListenerSettings &listener)
     listenerPosition.Set(0.0f, 0.0f, 0.0f);
     listenerVelocity.Set(0.0f, 0.0f, 0.0f);
     listenerRight.Set(1.0f, 0.0f, 0.0f);
+    listenerUp.Set(0.0f, 1.0f, 0.0f);
+    listenerForward.Set(0.0f, 0.0f, 1.0f);
 
     if (m_Manager) {
         listenerPosition = m_Manager->m_LastListenerPosition;
         listenerVelocity = m_Manager->m_LastListenerVelocity;
         listenerRight = m_Manager->m_LastListenerRight;
+        listenerUp = m_Manager->m_LastListenerUp;
+        listenerForward = m_Manager->m_LastListenerForward;
     }
+
+    NormalizeOrDefault(listenerRight, 1.0f, 0.0f, 0.0f);
+    NormalizeOrDefault(listenerUp, 0.0f, 1.0f, 0.0f);
+    NormalizeOrDefault(listenerForward, 0.0f, 0.0f, 1.0f);
 
     if (m_3DSettings.m_HeadRelative) {
         relative = m_3DSettings.m_Position;
+        sourceVelocity = m_3DSettings.m_Velocity;
+        sourceDirection = m_3DSettings.m_OrientationDir;
+        listenerVelocity.Set(0.0f, 0.0f, 0.0f);
     } else {
-        relative = m_3DSettings.m_Position - listenerPosition;
+        worldRelative = m_3DSettings.m_Position - listenerPosition;
+        relative.Set(DotProduct(worldRelative, listenerRight),
+                     DotProduct(worldRelative, listenerUp),
+                     DotProduct(worldRelative, listenerForward));
+        sourceVelocity.Set(DotProduct(m_3DSettings.m_Velocity, listenerRight),
+                           DotProduct(m_3DSettings.m_Velocity, listenerUp),
+                           DotProduct(m_3DSettings.m_Velocity, listenerForward));
+        sourceDirection.Set(DotProduct(m_3DSettings.m_OrientationDir, listenerRight),
+                            DotProduct(m_3DSettings.m_OrientationDir, listenerUp),
+                            DotProduct(m_3DSettings.m_OrientationDir, listenerForward));
+        listenerVelocity.Set(DotProduct(listenerVelocity, listenerRight),
+                             DotProduct(listenerVelocity, listenerUp),
+                             DotProduct(listenerVelocity, listenerForward));
     }
 
     px = relative.x * listener.m_DistanceFactor;
@@ -595,9 +632,9 @@ void SdlSoundSource::Apply3DSettings(const CKListenerSettings &listener)
     }
 
     coneGain = 1.0f;
-    len = m_3DSettings.m_OrientationDir.SquareMagnitude();
+    len = sourceDirection.SquareMagnitude();
     if (len > 0.000001f && distance > 0.000001f && m_3DSettings.m_OutAngle < 360.0f) {
-        coneDir = m_3DSettings.m_OrientationDir;
+        coneDir = sourceDirection;
         coneDir *= 1.0f / sqrtf(len);
 
         toListener.Set(-relative.x, -relative.y, -relative.z);
@@ -629,11 +666,7 @@ void SdlSoundSource::Apply3DSettings(const CKListenerSettings &listener)
         if (m_3DSettings.m_HeadRelative) {
             pan = ClampFloat(dirToSource.x, -1.0f, 1.0f);
         } else {
-            rightLen = listenerRight.SquareMagnitude();
-            if (rightLen > 0.000001f) {
-                listenerRight *= 1.0f / sqrtf(rightLen);
-                pan = ClampFloat(DotProduct(dirToSource, listenerRight), -1.0f, 1.0f);
-            }
+            pan = ClampFloat(dirToSource.x, -1.0f, 1.0f);
         }
     }
     leftGain = (pan > 0.0f) ? (1.0f - pan) : 1.0f;
@@ -651,7 +684,7 @@ void SdlSoundSource::Apply3DSettings(const CKListenerSettings &listener)
     doppler = 1.0f;
     if (listener.m_DopplerFactor != 0.0f && len > 0.000001f) {
         toListener.Set(-dirToSource.x, -dirToSource.y, -dirToSource.z);
-        sourceToward = DotProduct(m_3DSettings.m_Velocity, toListener);
+        sourceToward = DotProduct(sourceVelocity, toListener);
         listenerTowardSource = m_3DSettings.m_HeadRelative ? 0.0f : DotProduct(listenerVelocity, dirToSource);
         speed = SDL_SOUND_SPEED;
         if (listener.m_DistanceFactor > 0.000001f) {
