@@ -110,6 +110,7 @@ protected:
     void PositionSource(SdlSoundSource *source, CK3dEntity *ent, 
                        const VxVector &position, const VxVector &direction, 
                        VxVector &oldpos, float deltaTime);
+    void Refresh3DSources();
     
     // Resource validation
     CKBOOL ValidateSource(void *source) const;

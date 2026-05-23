@@ -1275,15 +1275,22 @@ void SdlSoundManager::Update3DSettings(void *source, CK_SOUNDMANAGER_CAPS settin
 void SdlSoundManager::UpdateListenerSettings(CK_SOUNDMANAGER_CAPS settingsoptions, 
                                              CKListenerSettings &settings, CKBOOL set)
 {
+    CKBOOL refresh3D;
+
     if (set) {
+        refresh3D = FALSE;
+
         if (settingsoptions & CK_LISTENERSETTINGS_DISTANCE) {
             m_ListenerSettings.m_DistanceFactor = settings.m_DistanceFactor;
+            refresh3D = TRUE;
         }
         if (settingsoptions & CK_LISTENERSETTINGS_DOPPLER) {
             m_ListenerSettings.m_DopplerFactor = settings.m_DopplerFactor;
+            refresh3D = TRUE;
         }
         if (settingsoptions & CK_LISTENERSETTINGS_ROLLOFF) {
             m_ListenerSettings.m_RollOff = settings.m_RollOff;
+            refresh3D = TRUE;
         }
         if (settingsoptions & CK_LISTENERSETTINGS_GAIN) {
             m_ListenerSettings.m_GlobalGain = settings.m_GlobalGain;
@@ -1296,6 +1303,10 @@ void SdlSoundManager::UpdateListenerSettings(CK_SOUNDMANAGER_CAPS settingsoption
         }
         if (settingsoptions & CK_LISTENERSETTINGS_SOFTWARESOURCES) {
             m_ListenerSettings.m_SoftwareSources = settings.m_SoftwareSources;
+        }
+
+        if (refresh3D) {
+            Refresh3DSources();
         }
     } else {
         if (settingsoptions & CK_LISTENERSETTINGS_DISTANCE) {
@@ -1358,6 +1369,29 @@ void SdlSoundManager::PositionSource(SdlSoundSource *source, CK3dEntity *ent,
     source->Apply3DSettings(m_ListenerSettings);
     
     oldpos = pos;
+}
+
+void SdlSoundManager::Refresh3DSources()
+{
+    CK_ID *it;
+    CKWaveSound *ws;
+    SoundMinion **itm;
+    SdlSoundSource *source;
+
+    for (it = m_SoundsPlaying.Begin(); it != m_SoundsPlaying.End(); ++it) {
+        ws = (CKWaveSound*)m_Context->GetObject(*it);
+        if (ws && ws->m_Source) {
+            source = (SdlSoundSource*)ws->m_Source;
+            source->Apply3DSettings(m_ListenerSettings);
+        }
+    }
+
+    for (itm = m_Minions.Begin(); itm != m_Minions.End(); ++itm) {
+        if (*itm && (*itm)->m_Source) {
+            source = (SdlSoundSource*)(*itm)->m_Source;
+            source->Apply3DSettings(m_ListenerSettings);
+        }
+    }
 }
 
 //-----------------------------------------------------------------------------
