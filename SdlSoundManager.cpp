@@ -81,6 +81,40 @@ static void NormalizeOrDefault(VxVector &value, float x, float y, float z)
     }
 }
 
+static float DirectionToPan(const VxVector &direction)
+{
+    float len = sqrtf(direction.x * direction.x + direction.z * direction.z);
+    if (len <= 0.000001f) return 0.0f;
+    return ClampFloat(direction.x / len, -1.0f, 1.0f);
+}
+
+static void ComputeConstantPowerPan(float pan, float &leftGain, float &rightGain)
+{
+    pan = ClampFloat(pan, -1.0f, 1.0f);
+    leftGain = sqrtf(0.5f * (1.0f - pan));
+    rightGain = sqrtf(0.5f * (1.0f + pan));
+}
+
+static void ComputeStereoVirtualPans(const VxVector &direction, float &leftPan, float &rightPan)
+{
+    float x = direction.x;
+    float z = direction.z;
+    float len = sqrtf(x * x + z * z);
+    const float sin30 = 0.5f;
+    const float cos30 = 0.8660254037844386f;
+
+    if (len > 0.000001f) {
+        x /= len;
+        z /= len;
+    } else {
+        x = 0.0f;
+        z = 1.0f;
+    }
+
+    leftPan = ClampFloat(x * cos30 - z * sin30, -1.0f, 1.0f);
+    rightPan = ClampFloat(x * cos30 + z * sin30, -1.0f, 1.0f);
+}
+
 CKERROR CreateSdlSoundManager(CKContext *context)
 {
     if (!context) return CKERR_INVALIDPARAMETER;
@@ -557,6 +591,9 @@ void SdlSoundSource::Apply3DSettings(const CKListenerSettings &listener)
     float doppler, pitch;
     float oldLL, oldLR, oldRL, oldRR;
     float leftGain, rightGain;
+    float leftPan, rightPan;
+    float leftChannelLeftGain, leftChannelRightGain;
+    float rightChannelLeftGain, rightChannelRightGain;
 
     if (!m_Stream) return;
     
@@ -663,18 +700,25 @@ void SdlSoundSource::Apply3DSettings(const CKListenerSettings &listener)
     if (len > 0.000001f) {
         invLen = 1.0f / sqrtf(len);
         dirToSource = relative * invLen;
-        if (m_3DSettings.m_HeadRelative) {
-            pan = ClampFloat(dirToSource.x, -1.0f, 1.0f);
-        } else {
-            pan = ClampFloat(dirToSource.x, -1.0f, 1.0f);
-        }
+        pan = DirectionToPan(dirToSource);
+    } else {
+        dirToSource.Set(0.0f, 0.0f, 1.0f);
     }
-    leftGain = (pan > 0.0f) ? (1.0f - pan) : 1.0f;
-    rightGain = (pan < 0.0f) ? (1.0f + pan) : 1.0f;
-    m_LeftToLeftGain = leftGain;
-    m_LeftToRightGain = (m_Format.nChannels == 1) ? rightGain : 0.0f;
-    m_RightToLeftGain = 0.0f;
-    m_RightToRightGain = (m_Format.nChannels == 2) ? rightGain : 0.0f;
+    if (m_Format.nChannels == 1) {
+        ComputeConstantPowerPan(pan, leftGain, rightGain);
+        m_LeftToLeftGain = leftGain;
+        m_LeftToRightGain = rightGain;
+        m_RightToLeftGain = 0.0f;
+        m_RightToRightGain = 0.0f;
+    } else {
+        ComputeStereoVirtualPans(dirToSource, leftPan, rightPan);
+        ComputeConstantPowerPan(leftPan, leftChannelLeftGain, leftChannelRightGain);
+        ComputeConstantPowerPan(rightPan, rightChannelLeftGain, rightChannelRightGain);
+        m_LeftToLeftGain = leftChannelLeftGain;
+        m_LeftToRightGain = leftChannelRightGain;
+        m_RightToLeftGain = rightChannelLeftGain;
+        m_RightToRightGain = rightChannelRightGain;
+    }
     if (MixMatrixChanged(oldLL, oldLR, oldRL, oldRR,
                          m_LeftToLeftGain, m_LeftToRightGain,
                          m_RightToLeftGain, m_RightToRightGain)) {
