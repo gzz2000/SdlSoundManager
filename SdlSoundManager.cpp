@@ -389,13 +389,33 @@ void SdlSoundSource::RefreshQueuedAudio()
     Uint64 queued;
     Uint64 consumed;
     CKDWORD playPos;
+    CKDWORD startPos;
     CKDWORD tailBytes;
+    CKDWORD queuedSourceBytes;
     int queuedBytes;
 
-    if (m_IsStreamed || !m_IsPlaying || !m_Stream || !m_Buffer || m_BufferSize == 0) return;
+    if (!m_IsPlaying || !m_Stream || !m_Buffer || m_BufferSize == 0) return;
 
     queuedBytes = GetQueuedSourceBytes();
     if (queuedBytes < 0) return;
+    queuedSourceBytes = (CKDWORD)queuedBytes;
+
+    if (m_IsStreamed) {
+        if (queuedSourceBytes == 0 || queuedSourceBytes > m_BufferSize) return;
+
+        startPos = (m_WritePos + m_BufferSize - queuedSourceBytes) % m_BufferSize;
+        SDL_ClearAudioStream(m_Stream);
+
+        tailBytes = min(queuedSourceBytes, m_BufferSize - startPos);
+        if (tailBytes > 0) {
+            QueueAudioData(m_Buffer + startPos, tailBytes);
+        }
+        if (queuedSourceBytes > tailBytes) {
+            QueueAudioData(m_Buffer, queuedSourceBytes - tailBytes);
+        }
+        SDL_FlushAudioStream(m_Stream);
+        return;
+    }
 
     queued = (Uint64)queuedBytes;
     consumed = (m_TotalBytesPushed > queued) ? (m_TotalBytesPushed - queued) : 0;
