@@ -450,16 +450,32 @@ void SdlSoundSource::ApplySettings()
 
 void SdlSoundSource::Apply3DSettings(const CKListenerSettings &listener)
 {
+    VxVector relative;
+    VxVector listenerPosition;
     float distance, attenuation;
+    float px, py, pz;
+    float range, dist_from_min;
 
     if (!m_Stream) return;
     
     // Only apply 3D for non-background sounds
     if (m_Type == CK_WAVESOUND_BACKGROUND) return;
 
-    const float px = m_3DSettings.m_Position.x * listener.m_DistanceFactor;
-    const float py = m_3DSettings.m_Position.y * listener.m_DistanceFactor;
-    const float pz = m_3DSettings.m_Position.z * listener.m_DistanceFactor;
+    listenerPosition.Set(0.0f, 0.0f, 0.0f);
+
+    if (m_Manager) {
+        listenerPosition = m_Manager->m_LastListenerPosition;
+    }
+
+    if (m_3DSettings.m_HeadRelative) {
+        relative = m_3DSettings.m_Position;
+    } else {
+        relative = m_3DSettings.m_Position - listenerPosition;
+    }
+
+    px = relative.x * listener.m_DistanceFactor;
+    py = relative.y * listener.m_DistanceFactor;
+    pz = relative.z * listener.m_DistanceFactor;
 
     // Calculate distance for custom attenuation
     distance = sqrtf(px * px + py * py + pz * pz);
@@ -467,13 +483,15 @@ void SdlSoundSource::Apply3DSettings(const CKListenerSettings &listener)
     // Apply min/max distance attenuation
     if (distance < m_3DSettings.m_MinDistance) {
         attenuation = 1.0f;
+    } else if (m_3DSettings.m_MaxDistance <= m_3DSettings.m_MinDistance) {
+        attenuation = m_3DSettings.m_MuteAfterMax ? 0.0f : 1.0f;
     } else if (distance > m_3DSettings.m_MaxDistance) {
         attenuation = m_3DSettings.m_MuteAfterMax ? 0.0f : 
                      m_3DSettings.m_MinDistance / m_3DSettings.m_MaxDistance;
     } else {
         // Linear rolloff between min and max
-        float range = m_3DSettings.m_MaxDistance - m_3DSettings.m_MinDistance;
-        float dist_from_min = distance - m_3DSettings.m_MinDistance;
+        range = m_3DSettings.m_MaxDistance - m_3DSettings.m_MinDistance;
+        dist_from_min = distance - m_3DSettings.m_MinDistance;
         attenuation = 1.0f - (dist_from_min / range) * listener.m_RollOff;
         if (attenuation < 0.0f) attenuation = 0.0f;
     }
@@ -637,6 +655,7 @@ void *SdlSoundManager::DuplicateSource(void *source)
     newSource->m_Settings = srcSource->m_Settings;
     newSource->m_3DSettings = srcSource->m_3DSettings;
     newSource->ApplySettings();
+    newSource->Apply3DSettings(m_ListenerSettings);
     
     return newSource;
 }
@@ -687,6 +706,9 @@ void SdlSoundManager::InternalPlay(void *source, CKBOOL loop)
         }
         sdlSource->m_IsBound = TRUE;
     }
+
+    sdlSource->ApplySettings();
+    sdlSource->Apply3DSettings(m_ListenerSettings);
     
     // For non-streamed sounds, put entire buffer in stream
     if (!sdlSource->m_IsStreamed && sdlSource->m_Buffer && sdlSource->m_BufferSize > 0) {
@@ -1051,6 +1073,7 @@ void SdlSoundManager::UpdateSettings(void *source, CK_SOUNDMANAGER_CAPS settings
         }
         
         sdlSource->ApplySettings();
+        sdlSource->Apply3DSettings(m_ListenerSettings);
     } else {
         // Get settings
         if (settingsoptions & CK_WAVESOUND_SETTINGS_GAIN) {
