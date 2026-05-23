@@ -630,6 +630,8 @@ SdlSoundManager::SdlSoundManager(CKContext *Context)
     m_LastListenerPosition.Set(0.0f, 0.0f, 0.0f);
     m_LastListenerVelocity.Set(0.0f, 0.0f, 0.0f);
     m_LastListenerRight.Set(1.0f, 0.0f, 0.0f);
+    m_LastListenerUp.Set(0.0f, 1.0f, 0.0f);
+    m_LastListenerForward.Set(0.0f, 0.0f, 1.0f);
     
     m_Mutex = SDL_CreateMutex();
     m_Context->RegisterNewManager(this);
@@ -1563,9 +1565,13 @@ CKERROR SdlSoundManager::PostProcess()
     const VxMatrix *mat;
     const VxVector4 *pos;
     const VxVector4 *right;
+    const VxVector4 *up;
+    const VxVector4 *forward;
     VxVector oldListenerPosition;
     VxVector oldListenerVelocity;
     VxVector oldListenerRight;
+    VxVector oldListenerUp;
+    VxVector oldListenerForward;
     VxVector delta;
     
     if (!ValidateMixer()) return CK_OK;
@@ -1576,11 +1582,15 @@ CKERROR SdlSoundManager::PostProcess()
     oldListenerPosition = m_LastListenerPosition;
     oldListenerVelocity = m_LastListenerVelocity;
     oldListenerRight = m_LastListenerRight;
+    oldListenerUp = m_LastListenerUp;
+    oldListenerForward = m_LastListenerForward;
 
     listener = GetListener();
     if (listener) {
         mat = &listener->GetWorldMatrix();
         right = &(*mat)[0];
+        up = &(*mat)[1];
+        forward = &(*mat)[2];
         pos = &(*mat)[3];
         if (deltaTime > 0.0f) {
             m_LastListenerVelocity.Set((pos->x - m_LastListenerPosition.x) / (deltaTime * 0.001f),
@@ -1590,11 +1600,15 @@ CKERROR SdlSoundManager::PostProcess()
             m_LastListenerVelocity.Set(0.0f, 0.0f, 0.0f);
         }
         m_LastListenerRight.Set(right->x, right->y, right->z);
+        m_LastListenerUp.Set(up->x, up->y, up->z);
+        m_LastListenerForward.Set(forward->x, forward->y, forward->z);
         m_LastListenerPosition.Set(pos->x, pos->y, pos->z);
     } else {
         m_LastListenerPosition.Set(0.0f, 0.0f, 0.0f);
         m_LastListenerVelocity.Set(0.0f, 0.0f, 0.0f);
         m_LastListenerRight.Set(1.0f, 0.0f, 0.0f);
+        m_LastListenerUp.Set(0.0f, 1.0f, 0.0f);
+        m_LastListenerForward.Set(0.0f, 0.0f, 1.0f);
     }
 
     delta = m_LastListenerPosition - oldListenerPosition;
@@ -1608,6 +1622,16 @@ CKERROR SdlSoundManager::PostProcess()
             delta = m_LastListenerRight - oldListenerRight;
             if (delta.SquareMagnitude() > 0.000001f) {
                 Refresh3DSources();
+            } else {
+                delta = m_LastListenerUp - oldListenerUp;
+                if (delta.SquareMagnitude() > 0.000001f) {
+                    Refresh3DSources();
+                } else {
+                    delta = m_LastListenerForward - oldListenerForward;
+                    if (delta.SquareMagnitude() > 0.000001f) {
+                        Refresh3DSources();
+                    }
+                }
             }
         }
     }

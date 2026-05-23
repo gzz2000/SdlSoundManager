@@ -141,6 +141,8 @@ private:
     VxVector m_LastListenerPosition;
     VxVector m_LastListenerVelocity;
     VxVector m_LastListenerRight;
+    VxVector m_LastListenerUp;
+    VxVector m_LastListenerForward;
     
     // Listener settings (cached)
     CKListenerSettings m_ListenerSettings;
