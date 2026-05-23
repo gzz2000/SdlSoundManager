@@ -482,7 +482,8 @@ void SdlSoundSource::Apply3DSettings(const CKListenerSettings &listener)
     VxVector coneDir;
     float distance, attenuation;
     float px, py, pz;
-    float range, dist_from_min;
+    float minDistance, maxDistance;
+    float rolloff, clampedDistance;
     float len, invLen;
     float pan;
     float coneGain;
@@ -523,21 +524,22 @@ void SdlSoundSource::Apply3DSettings(const CKListenerSettings &listener)
 
     // Calculate distance for custom attenuation
     distance = sqrtf(px * px + py * py + pz * pz);
+    minDistance = m_3DSettings.m_MinDistance;
+    maxDistance = m_3DSettings.m_MaxDistance;
+    rolloff = listener.m_RollOff;
+    if (minDistance < 0.000001f) minDistance = 0.000001f;
+    if (maxDistance < minDistance) maxDistance = minDistance;
+    if (rolloff < 0.0f) rolloff = 0.0f;
     
     // Apply min/max distance attenuation
-    if (distance < m_3DSettings.m_MinDistance) {
+    if (distance < minDistance || rolloff == 0.0f) {
         attenuation = 1.0f;
-    } else if (m_3DSettings.m_MaxDistance <= m_3DSettings.m_MinDistance) {
-        attenuation = m_3DSettings.m_MuteAfterMax ? 0.0f : 1.0f;
-    } else if (distance > m_3DSettings.m_MaxDistance) {
-        attenuation = m_3DSettings.m_MuteAfterMax ? 0.0f : 
-                     m_3DSettings.m_MinDistance / m_3DSettings.m_MaxDistance;
+    } else if (distance > maxDistance && m_3DSettings.m_MuteAfterMax) {
+        attenuation = 0.0f;
     } else {
-        // Linear rolloff between min and max
-        range = m_3DSettings.m_MaxDistance - m_3DSettings.m_MinDistance;
-        dist_from_min = distance - m_3DSettings.m_MinDistance;
-        attenuation = 1.0f - (dist_from_min / range) * listener.m_RollOff;
-        if (attenuation < 0.0f) attenuation = 0.0f;
+        clampedDistance = (distance > maxDistance) ? maxDistance : distance;
+        attenuation = minDistance / (minDistance + rolloff * (clampedDistance - minDistance));
+        attenuation = ClampFloat(attenuation, 0.0f, 1.0f);
     }
 
     coneGain = 1.0f;
