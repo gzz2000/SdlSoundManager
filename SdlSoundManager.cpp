@@ -685,11 +685,11 @@ void SdlSoundManager::InternalPlay(void *source, CKBOOL loop)
         const CKDWORD tailBytes = sdlSource->m_BufferSize - startPos;
 
         if (tailBytes > 0) {
-            SDL_PutAudioStreamData(sdlSource->m_Stream, sdlSource->m_Buffer + startPos, (int)tailBytes);
+            sdlSource->QueueAudioData(sdlSource->m_Buffer + startPos, tailBytes);
             sdlSource->m_TotalBytesPushed += tailBytes;
         }
         if (loop && startPos > 0) {
-            SDL_PutAudioStreamData(sdlSource->m_Stream, sdlSource->m_Buffer, (int)startPos);
+            sdlSource->QueueAudioData(sdlSource->m_Buffer, startPos);
             sdlSource->m_TotalBytesPushed += startPos;
         }
         SDL_FlushAudioStream(sdlSource->m_Stream);
@@ -754,11 +754,11 @@ void SdlSoundManager::SetPlayPosition(void *source, int pos)
         const CKDWORD startPos = min((CKDWORD)pos, sdlSource->m_BufferSize);
         const CKDWORD tailBytes = sdlSource->m_BufferSize - startPos;
         if (tailBytes > 0) {
-            SDL_PutAudioStreamData(sdlSource->m_Stream, sdlSource->m_Buffer + startPos, (int)tailBytes);
+            sdlSource->QueueAudioData(sdlSource->m_Buffer + startPos, tailBytes);
             sdlSource->m_TotalBytesPushed += tailBytes;
         }
         if (sdlSource->m_IsLooping && startPos > 0) {
-            SDL_PutAudioStreamData(sdlSource->m_Stream, sdlSource->m_Buffer, (int)startPos);
+            sdlSource->QueueAudioData(sdlSource->m_Buffer, startPos);
             sdlSource->m_TotalBytesPushed += startPos;
         }
         SDL_FlushAudioStream(sdlSource->m_Stream);
@@ -777,7 +777,7 @@ int SdlSoundManager::GetPlayPosition(void *source)
     sdlSource = (SdlSoundSource*)source;
 
     if (sdlSource->m_Stream) {
-        queuedBytes = SDL_GetAudioStreamQueued(sdlSource->m_Stream);
+        queuedBytes = sdlSource->GetQueuedSourceBytes();
         if (queuedBytes >= 0) {
             queued = (Uint64)queuedBytes;
             consumed = (sdlSource->m_TotalBytesPushed > queued) ? (sdlSource->m_TotalBytesPushed - queued) : 0;
@@ -823,10 +823,8 @@ CKBOOL SdlSoundManager::IsPlaying(void *source)
     }
 
     if (drained && sdlSource->m_IsLooping && !sdlSource->m_IsStreamed && sdlSource->m_Buffer && sdlSource->m_BufferSize > 0) {
-        // Simple loop support: queue another copy of the whole buffer.
-        SDL_PutAudioStreamData(sdlSource->m_Stream, sdlSource->m_Buffer, (int)sdlSource->m_BufferSize);
-        sdlSource->m_TotalBytesPushed += sdlSource->m_BufferSize;
-        SDL_FlushAudioStream(sdlSource->m_Stream);
+        // Simple loop support: queue from the current cursor again.
+        sdlSource->RefreshQueuedAudio();
     }
 
     return TRUE;
@@ -840,6 +838,7 @@ CKERROR SdlSoundManager::SetWaveFormat(void *source, CKWaveFormat &wf)
 {
     SdlSoundSource *sdlSource;
     SDL_AudioSpec spec;
+    SDL_AudioSpec streamSpec;
     
     if (!ValidateSource(source)) return CKERR_INVALIDPARAMETER;
     
@@ -851,7 +850,11 @@ CKERROR SdlSoundManager::SetWaveFormat(void *source, CKWaveFormat &wf)
         spec.format = CKFormatToSDL(wf);
         spec.channels = wf.nChannels;
         spec.freq = wf.nSamplesPerSec;
-        SDL_SetAudioStreamFormat(sdlSource->m_Stream, &spec, NULL);
+        streamSpec = spec;
+        if (streamSpec.channels == 1) {
+            streamSpec.channels = 2;
+        }
+        SDL_SetAudioStreamFormat(sdlSource->m_Stream, &streamSpec, NULL);
     }
     
     return CK_OK;
@@ -960,11 +963,11 @@ CKERROR SdlSoundManager::Unlock(void *source, void *pvAudioPtr1, CKDWORD dwNumBy
     // For streamed sounds, feed data to SDL audio stream
     if (sdlSource->m_IsStreamed && sdlSource->m_Stream) {
         if (pvAudioPtr1 && dwNumBytes1 > 0) {
-            SDL_PutAudioStreamData(sdlSource->m_Stream, pvAudioPtr1, dwNumBytes1);
+            sdlSource->QueueAudioData(pvAudioPtr1, dwNumBytes1);
             sdlSource->m_TotalBytesPushed += dwNumBytes1;
         }
         if (pvAudioPtr2 && dwAudioBytes2 > 0) {
-            SDL_PutAudioStreamData(sdlSource->m_Stream, pvAudioPtr2, dwAudioBytes2);
+            sdlSource->QueueAudioData(pvAudioPtr2, dwAudioBytes2);
             sdlSource->m_TotalBytesPushed += dwAudioBytes2;
         }
     }
