@@ -1218,6 +1218,17 @@ CKERROR SdlSoundManager::SetWaveFormat(void *source, CKWaveFormat &wf)
     if (!ValidateSource(source)) return CKERR_INVALIDPARAMETER;
     
     sdlSource = (SdlSoundSource*)source;
+
+    if (sdlSource->m_Stream) {
+        SDL_ClearAudioStream(sdlSource->m_Stream);
+        sdlSource->ForgetQueuedMixMatrix();
+        sdlSource->m_TotalBytesPushed = 0;
+        sdlSource->m_PlayPos = 0;
+        if (sdlSource->m_IsStreamed) {
+            sdlSource->m_WritePos = 0;
+        }
+    }
+
     memcpy(&sdlSource->m_Format, &wf, sizeof(CKWaveFormat));
     sdlSource->ResetMixMatrix();
     
@@ -1230,7 +1241,7 @@ CKERROR SdlSoundManager::SetWaveFormat(void *source, CKWaveFormat &wf)
         if (streamSpec.channels == 1) {
             streamSpec.channels = 2;
         }
-        SDL_SetAudioStreamFormat(sdlSource->m_Stream, &streamSpec, NULL);
+        SDL_SetAudioStreamFormat(sdlSource->m_Stream, &streamSpec, &streamSpec);
     }
 
     sdlSource->ApplySettings();
