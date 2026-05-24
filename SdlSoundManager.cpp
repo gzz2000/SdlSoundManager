@@ -292,6 +292,8 @@ SdlSoundSource::SdlSoundSource()
     m_Stream = NULL;
     m_Buffer = NULL;
     m_BufferSize = 0;
+    m_MixBuffer = NULL;
+    m_MixBufferSize = 0;
     m_WritePos = 0;
     m_PlayPos = 0;
     m_Type = CK_WAVESOUND_BACKGROUND;
@@ -398,8 +400,14 @@ void SdlSoundSource::Cleanup()
         delete[] m_Buffer;
         m_Buffer = NULL;
     }
+
+    if (m_MixBuffer) {
+        delete[] m_MixBuffer;
+        m_MixBuffer = NULL;
+    }
     
     m_BufferSize = 0;
+    m_MixBufferSize = 0;
     m_Manager = NULL;
     m_TotalBytesPushed = 0;
     ResetMixMatrix();
@@ -483,12 +491,21 @@ void SdlSoundSource::QueueAudioData(const void *data, CKDWORD bytes)
     }
 
     mixedBytes = (m_Format.nChannels == 1) ? (bytes * 2) : bytes;
-    mixed = new CKBYTE[mixedBytes];
-    if (!mixed) {
-        SDL_PutAudioStreamData(m_Stream, data, (int)bytes);
-        if (!m_HasQueuedMixMatrix) RememberQueuedMixMatrix();
-        return;
+    if (mixedBytes > m_MixBufferSize) {
+        if (m_MixBuffer) {
+            delete[] m_MixBuffer;
+            m_MixBuffer = NULL;
+            m_MixBufferSize = 0;
+        }
+        m_MixBuffer = new CKBYTE[mixedBytes];
+        if (!m_MixBuffer) {
+            SDL_PutAudioStreamData(m_Stream, data, (int)bytes);
+            if (!m_HasQueuedMixMatrix) RememberQueuedMixMatrix();
+            return;
+        }
+        m_MixBufferSize = mixedBytes;
     }
+    mixed = m_MixBuffer;
 
     frameBytes = m_Format.nBlockAlign;
 
@@ -568,7 +585,6 @@ void SdlSoundSource::QueueAudioData(const void *data, CKDWORD bytes)
 
     SDL_PutAudioStreamData(m_Stream, mixed, (int)mixedBytes);
     if (!m_HasQueuedMixMatrix) RememberQueuedMixMatrix();
-    delete[] mixed;
 }
 
 int SdlSoundSource::GetPendingSourceBytes() const

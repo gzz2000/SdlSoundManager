@@ -182,6 +182,10 @@ struct SdlSoundSource
     // Ring buffer for PCM data
     CKBYTE *m_Buffer;
     CKDWORD m_BufferSize;
+
+    // Scratch buffer for software stereo mixing
+    CKBYTE *m_MixBuffer;
+    CKDWORD m_MixBufferSize;
     
     // Buffer positions
     CKDWORD m_WritePos;
