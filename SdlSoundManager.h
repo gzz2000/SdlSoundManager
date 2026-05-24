@@ -211,6 +211,12 @@ struct SdlSoundSource
     float m_LeftToRightGain;
     float m_RightToLeftGain;
     float m_RightToRightGain;
+
+    float m_QueuedLeftToLeftGain;
+    float m_QueuedLeftToRightGain;
+    float m_QueuedRightToLeftGain;
+    float m_QueuedRightToRightGain;
+    CKBOOL m_HasQueuedMixMatrix;
     
     SdlSoundSource();
     ~SdlSoundSource();
@@ -227,6 +233,9 @@ struct SdlSoundSource
     void QueueAudioData(const void *data, CKDWORD bytes);
     void RefreshQueuedAudio();
     int GetPendingSourceBytes() const;
+    void ForgetQueuedMixMatrix();
+    void RememberQueuedMixMatrix();
+    CKBOOL QueuedMixMatrixChanged() const;
 };
 
 // Factory function

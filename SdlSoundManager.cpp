@@ -381,6 +381,34 @@ void SdlSoundSource::ResetMixMatrix()
         m_LeftToRightGain = 0.0f;
         m_RightToRightGain = 1.0f;
     }
+    ForgetQueuedMixMatrix();
+}
+
+void SdlSoundSource::ForgetQueuedMixMatrix()
+{
+    m_QueuedLeftToLeftGain = m_LeftToLeftGain;
+    m_QueuedLeftToRightGain = m_LeftToRightGain;
+    m_QueuedRightToLeftGain = m_RightToLeftGain;
+    m_QueuedRightToRightGain = m_RightToRightGain;
+    m_HasQueuedMixMatrix = FALSE;
+}
+
+void SdlSoundSource::RememberQueuedMixMatrix()
+{
+    m_QueuedLeftToLeftGain = m_LeftToLeftGain;
+    m_QueuedLeftToRightGain = m_LeftToRightGain;
+    m_QueuedRightToLeftGain = m_RightToLeftGain;
+    m_QueuedRightToRightGain = m_RightToRightGain;
+    m_HasQueuedMixMatrix = TRUE;
+}
+
+CKBOOL SdlSoundSource::QueuedMixMatrixChanged() const
+{
+    if (!m_HasQueuedMixMatrix) return FALSE;
+    return MixMatrixChanged(m_QueuedLeftToLeftGain, m_QueuedLeftToRightGain,
+                            m_QueuedRightToLeftGain, m_QueuedRightToRightGain,
+                            m_LeftToLeftGain, m_LeftToRightGain,
+                            m_RightToLeftGain, m_RightToRightGain);
 }
 
 void SdlSoundSource::QueueAudioData(const void *data, CKDWORD bytes)
@@ -407,6 +435,7 @@ void SdlSoundSource::QueueAudioData(const void *data, CKDWORD bytes)
         (m_Format.nChannels != 1 && m_Format.nChannels != 2) ||
         (m_Format.wBitsPerSample != 8 && m_Format.wBitsPerSample != 16 && m_Format.wBitsPerSample != 32)) {
         SDL_PutAudioStreamData(m_Stream, data, (int)bytes);
+        if (!m_HasQueuedMixMatrix) RememberQueuedMixMatrix();
         return;
     }
 
@@ -414,6 +443,7 @@ void SdlSoundSource::QueueAudioData(const void *data, CKDWORD bytes)
         m_LeftToLeftGain == 1.0f && m_LeftToRightGain == 0.0f &&
         m_RightToLeftGain == 0.0f && m_RightToRightGain == 1.0f) {
         SDL_PutAudioStreamData(m_Stream, data, (int)bytes);
+        if (!m_HasQueuedMixMatrix) RememberQueuedMixMatrix();
         return;
     }
 
@@ -421,6 +451,7 @@ void SdlSoundSource::QueueAudioData(const void *data, CKDWORD bytes)
     mixed = new CKBYTE[mixedBytes];
     if (!mixed) {
         SDL_PutAudioStreamData(m_Stream, data, (int)bytes);
+        if (!m_HasQueuedMixMatrix) RememberQueuedMixMatrix();
         return;
     }
 
@@ -501,6 +532,7 @@ void SdlSoundSource::QueueAudioData(const void *data, CKDWORD bytes)
     }
 
     SDL_PutAudioStreamData(m_Stream, mixed, (int)mixedBytes);
+    if (!m_HasQueuedMixMatrix) RememberQueuedMixMatrix();
     delete[] mixed;
 }
 
@@ -551,6 +583,7 @@ void SdlSoundSource::RefreshQueuedAudio()
 
         startPos = (m_WritePos + m_BufferSize - queuedSourceBytes) % m_BufferSize;
         SDL_ClearAudioStream(m_Stream);
+        ForgetQueuedMixMatrix();
 
         tailBytes = min(queuedSourceBytes, m_BufferSize - startPos);
         if (tailBytes > 0) {
@@ -568,6 +601,7 @@ void SdlSoundSource::RefreshQueuedAudio()
     playPos = (CKDWORD)((m_PlayPos + consumed) % m_BufferSize);
 
     SDL_ClearAudioStream(m_Stream);
+    ForgetQueuedMixMatrix();
     m_TotalBytesPushed = 0;
     m_PlayPos = playPos;
 
@@ -585,17 +619,11 @@ void SdlSoundSource::RefreshQueuedAudio()
 
 void SdlSoundSource::ApplySettings()
 {
-    float oldLL, oldLR, oldRL, oldRR;
     float leftGain, rightGain;
     float pan;
     float pitch;
 
     if (!m_Stream) return;
-
-    oldLL = m_LeftToLeftGain;
-    oldLR = m_LeftToRightGain;
-    oldRL = m_RightToLeftGain;
-    oldRR = m_RightToRightGain;
 
     pitch = m_Settings.m_Pitch;
     if (pitch <= 0.0f) pitch = 1.0f;
@@ -620,9 +648,7 @@ void SdlSoundSource::ApplySettings()
         m_RightToRightGain = 1.0f;
     }
 
-    if (MixMatrixChanged(oldLL, oldLR, oldRL, oldRR,
-                         m_LeftToLeftGain, m_LeftToRightGain,
-                         m_RightToLeftGain, m_RightToRightGain)) {
+    if (QueuedMixMatrixChanged()) {
         RefreshQueuedAudio();
     }
 }
@@ -653,7 +679,6 @@ void SdlSoundSource::Apply3DSettings(const CKListenerSettings &listener)
     float speed, numer, denom;
     float sourceToward, listenerTowardSource;
     float doppler, pitch;
-    float oldLL, oldLR, oldRL, oldRR;
     float leftGain, rightGain;
     float leftPan, rightPan;
     float leftChannelLeftGain, leftChannelRightGain;
@@ -663,11 +688,6 @@ void SdlSoundSource::Apply3DSettings(const CKListenerSettings &listener)
     
     // Only apply 3D for non-background sounds
     if (m_Type == CK_WAVESOUND_BACKGROUND) return;
-
-    oldLL = m_LeftToLeftGain;
-    oldLR = m_LeftToRightGain;
-    oldRL = m_RightToLeftGain;
-    oldRR = m_RightToRightGain;
 
     listenerPosition.Set(0.0f, 0.0f, 0.0f);
     listenerVelocity.Set(0.0f, 0.0f, 0.0f);
@@ -785,9 +805,7 @@ void SdlSoundSource::Apply3DSettings(const CKListenerSettings &listener)
         NormalizeStereoMixMatrix(m_LeftToLeftGain, m_LeftToRightGain,
                                  m_RightToLeftGain, m_RightToRightGain);
     }
-    if (MixMatrixChanged(oldLL, oldLR, oldRL, oldRR,
-                         m_LeftToLeftGain, m_LeftToRightGain,
-                         m_RightToLeftGain, m_RightToRightGain)) {
+    if (QueuedMixMatrixChanged()) {
         RefreshQueuedAudio();
     }
 
@@ -1032,6 +1050,7 @@ void SdlSoundManager::InternalPlay(void *source, CKBOOL loop)
     if (!sdlSource->m_IsStreamed && sdlSource->m_Buffer && sdlSource->m_BufferSize > 0) {
         // Clear any existing data
         SDL_ClearAudioStream(sdlSource->m_Stream);
+        sdlSource->ForgetQueuedMixMatrix();
         sdlSource->m_TotalBytesPushed = 0;
 
         const CKDWORD startPos = min((CKDWORD)max(0, sdlSource->m_PlayPos), sdlSource->m_BufferSize);
@@ -1094,6 +1113,7 @@ void SdlSoundManager::SetPlayPosition(void *source, int pos)
 
     if (sdlSource->m_IsStreamed && sdlSource->m_Stream) {
         SDL_ClearAudioStream(sdlSource->m_Stream);
+        sdlSource->ForgetQueuedMixMatrix();
         sdlSource->m_TotalBytesPushed = 0;
         sdlSource->m_PlayPos = 0;
         sdlSource->m_WritePos = 0;
@@ -1102,6 +1122,7 @@ void SdlSoundManager::SetPlayPosition(void *source, int pos)
 
     if (!sdlSource->m_IsStreamed && sdlSource->m_Stream && sdlSource->m_IsPlaying) {
         SDL_ClearAudioStream(sdlSource->m_Stream);
+        sdlSource->ForgetQueuedMixMatrix();
         sdlSource->m_TotalBytesPushed = 0;
 
         const CKDWORD startPos = min((CKDWORD)pos, sdlSource->m_BufferSize);
@@ -1172,6 +1193,7 @@ CKBOOL SdlSoundManager::IsPlaying(void *source)
             sdlSource->m_IsBound = FALSE;
         }
         sdlSource->m_IsPlaying = FALSE;
+        sdlSource->ForgetQueuedMixMatrix();
         return FALSE;
     }
 
