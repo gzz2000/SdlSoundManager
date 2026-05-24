@@ -71,6 +71,36 @@ static CKBOOL MixMatrixChanged(float oldLL, float oldLR, float oldRL, float oldR
            fabsf(oldRR - newRR) > 0.01f;
 }
 
+static int GetSampleBytes(const CKWaveFormat &format)
+{
+    if (format.wBitsPerSample == 0) return 0;
+    return (int)(format.wBitsPerSample / 8);
+}
+
+static int GetStreamBlockAlign(const CKWaveFormat &format)
+{
+    int sampleBytes = GetSampleBytes(format);
+    int channels = (format.nChannels == 1) ? 2 : format.nChannels;
+
+    if (sampleBytes <= 0 || channels <= 0) return 0;
+    return sampleBytes * channels;
+}
+
+static int StreamBytesToSourceBytes(int streamBytes, const CKWaveFormat &format, float frameScale)
+{
+    int streamBlockAlign = GetStreamBlockAlign(format);
+    double sourceBytes;
+
+    if (streamBytes <= 0) return 0;
+    if (streamBlockAlign <= 0 || format.nBlockAlign == 0) return streamBytes;
+
+    sourceBytes = ((double)streamBytes / (double)streamBlockAlign) *
+                  (double)format.nBlockAlign * (double)frameScale;
+    if (sourceBytes <= 0.0) return 0;
+    if (sourceBytes > 2147483647.0) return 2147483647;
+    return (int)ceil(sourceBytes);
+}
+
 static void NormalizeOrDefault(VxVector &value, float x, float y, float z)
 {
     float len = value.SquareMagnitude();
@@ -474,16 +504,30 @@ void SdlSoundSource::QueueAudioData(const void *data, CKDWORD bytes)
     delete[] mixed;
 }
 
-int SdlSoundSource::GetQueuedSourceBytes() const
+int SdlSoundSource::GetPendingSourceBytes() const
 {
     int queuedBytes;
+    int availableBytes;
+    int queuedSourceBytes;
+    int availableSourceBytes;
+    float ratio;
+    Sint64 pendingBytes;
 
     if (!m_Stream) return 0;
 
     queuedBytes = SDL_GetAudioStreamQueued(m_Stream);
-    if (queuedBytes <= 0) return queuedBytes;
+    availableBytes = SDL_GetAudioStreamAvailable(m_Stream);
+    if (queuedBytes < 0 || availableBytes < 0) return -1;
 
-    return (m_Format.nChannels == 1) ? (queuedBytes / 2) : queuedBytes;
+    queuedSourceBytes = StreamBytesToSourceBytes(queuedBytes, m_Format, 1.0f);
+
+    ratio = SDL_GetAudioStreamFrequencyRatio(m_Stream);
+    if (ratio <= 0.0f) ratio = 1.0f;
+    availableSourceBytes = StreamBytesToSourceBytes(availableBytes, m_Format, ratio);
+
+    pendingBytes = (Sint64)queuedSourceBytes + (Sint64)availableSourceBytes;
+    if (pendingBytes > 2147483647) return 2147483647;
+    return (int)pendingBytes;
 }
 
 void SdlSoundSource::RefreshQueuedAudio()
@@ -498,7 +542,7 @@ void SdlSoundSource::RefreshQueuedAudio()
 
     if (!m_IsPlaying || !m_Stream || !m_Buffer || m_BufferSize == 0) return;
 
-    queuedBytes = GetQueuedSourceBytes();
+    queuedBytes = GetPendingSourceBytes();
     if (queuedBytes < 0) return;
     queuedSourceBytes = (CKDWORD)queuedBytes;
 
@@ -1086,7 +1130,7 @@ int SdlSoundManager::GetPlayPosition(void *source)
     sdlSource = (SdlSoundSource*)source;
 
     if (sdlSource->m_Stream) {
-        queuedBytes = sdlSource->GetQueuedSourceBytes();
+        queuedBytes = sdlSource->GetPendingSourceBytes();
         if (queuedBytes >= 0) {
             queued = (Uint64)queuedBytes;
             consumed = (sdlSource->m_TotalBytesPushed > queued) ? (sdlSource->m_TotalBytesPushed - queued) : 0;

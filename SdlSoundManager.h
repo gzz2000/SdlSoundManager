@@ -226,7 +226,7 @@ struct SdlSoundSource
     void Apply3DSettings(const CKListenerSettings &listener);
     void QueueAudioData(const void *data, CKDWORD bytes);
     void RefreshQueuedAudio();
-    int GetQueuedSourceBytes() const;
+    int GetPendingSourceBytes() const;
 };
 
 // Factory function
