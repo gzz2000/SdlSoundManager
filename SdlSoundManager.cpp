@@ -145,6 +145,41 @@ static void ComputeStereoVirtualPans(const VxVector &direction, float &leftPan, 
     rightPan = ClampFloat(x * cos30 + z * sin30, -1.0f, 1.0f);
 }
 
+static CKBOOL ComputeOrientedStereoVirtualPans(const VxVector &direction,
+                                               VxVector sourceDirection, VxVector sourceUp,
+                                               float &leftPan, float &rightPan)
+{
+    VxVector sourceRight;
+    VxVector leftDirection;
+    VxVector rightDirection;
+    float len;
+    const float spread = 0.5f;
+
+    len = sourceDirection.SquareMagnitude();
+    if (len <= 0.000001f) return FALSE;
+    sourceDirection *= 1.0f / sqrtf(len);
+
+    len = sourceUp.SquareMagnitude();
+    if (len <= 0.000001f) return FALSE;
+    sourceUp *= 1.0f / sqrtf(len);
+    sourceUp -= sourceDirection * DotProduct(sourceUp, sourceDirection);
+
+    len = sourceUp.SquareMagnitude();
+    if (len <= 0.000001f) return FALSE;
+    sourceUp *= 1.0f / sqrtf(len);
+
+    sourceRight = CrossProduct(sourceUp, sourceDirection);
+    len = sourceRight.SquareMagnitude();
+    if (len <= 0.000001f) return FALSE;
+    sourceRight *= 1.0f / sqrtf(len);
+
+    leftDirection = direction - sourceRight * spread;
+    rightDirection = direction + sourceRight * spread;
+    leftPan = DirectionToPan(leftDirection);
+    rightPan = DirectionToPan(rightDirection);
+    return TRUE;
+}
+
 static void NormalizeStereoMixMatrix(float &leftToLeft, float &leftToRight,
                                      float &rightToLeft, float &rightToRight)
 {
@@ -663,6 +698,7 @@ void SdlSoundSource::Apply3DSettings(const CKListenerSettings &listener)
     VxVector listenerForward;
     VxVector sourceVelocity;
     VxVector sourceDirection;
+    VxVector sourceUp;
     VxVector worldRelative;
     VxVector dirToSource;
     VxVector toListener;
@@ -711,6 +747,7 @@ void SdlSoundSource::Apply3DSettings(const CKListenerSettings &listener)
         relative = m_3DSettings.m_Position;
         sourceVelocity = m_3DSettings.m_Velocity;
         sourceDirection = m_3DSettings.m_OrientationDir;
+        sourceUp = m_3DSettings.m_OrientationUp;
         listenerVelocity.Set(0.0f, 0.0f, 0.0f);
     } else {
         worldRelative = m_3DSettings.m_Position - listenerPosition;
@@ -723,6 +760,9 @@ void SdlSoundSource::Apply3DSettings(const CKListenerSettings &listener)
         sourceDirection.Set(DotProduct(m_3DSettings.m_OrientationDir, listenerRight),
                             DotProduct(m_3DSettings.m_OrientationDir, listenerUp),
                             DotProduct(m_3DSettings.m_OrientationDir, listenerForward));
+        sourceUp.Set(DotProduct(m_3DSettings.m_OrientationUp, listenerRight),
+                     DotProduct(m_3DSettings.m_OrientationUp, listenerUp),
+                     DotProduct(m_3DSettings.m_OrientationUp, listenerForward));
         listenerVelocity.Set(DotProduct(listenerVelocity, listenerRight),
                              DotProduct(listenerVelocity, listenerUp),
                              DotProduct(listenerVelocity, listenerForward));
@@ -795,7 +835,10 @@ void SdlSoundSource::Apply3DSettings(const CKListenerSettings &listener)
         m_RightToLeftGain = 0.0f;
         m_RightToRightGain = 0.0f;
     } else {
-        ComputeStereoVirtualPans(dirToSource, leftPan, rightPan);
+        if (!ComputeOrientedStereoVirtualPans(dirToSource, sourceDirection, sourceUp,
+                                              leftPan, rightPan)) {
+            ComputeStereoVirtualPans(dirToSource, leftPan, rightPan);
+        }
         ComputeConstantPowerPan(leftPan, leftChannelLeftGain, leftChannelRightGain);
         ComputeConstantPowerPan(rightPan, rightChannelLeftGain, rightChannelRightGain);
         m_LeftToLeftGain = leftChannelLeftGain;
@@ -1602,7 +1645,7 @@ void SdlSoundManager::PositionSource(SdlSoundSource *source, CK3dEntity *ent,
                                      const VxVector &position, const VxVector &direction, 
                                      VxVector &oldpos, float deltaTime)
 {
-    VxVector pos, vel, dir;
+    VxVector pos, vel, dir, up, baseUp;
 
     if (!source) return;
     
@@ -1621,14 +1664,18 @@ void SdlSoundManager::PositionSource(SdlSoundSource *source, CK3dEntity *ent,
 
     // Calculate orientation
     dir = direction;
+    up.Set(0.0f, 1.0f, 0.0f);
     if (ent) {
         ent->TransformVector(&dir, &direction);
+        baseUp = up;
+        ent->TransformVector(&up, &baseUp);
     }
     
     // Update 3D position in source settings
     source->m_3DSettings.m_Position = pos;
     source->m_3DSettings.m_Velocity = vel;
     source->m_3DSettings.m_OrientationDir = dir;
+    source->m_3DSettings.m_OrientationUp = up;
 
     source->Apply3DSettings(m_ListenerSettings);
     
