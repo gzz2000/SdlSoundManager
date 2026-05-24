@@ -219,6 +219,7 @@ struct SdlSoundSource
     CKBOOL Initialize(SdlSoundManager *manager, CK_WAVESOUND_TYPE type, 
                      const CKWaveFormat *wf, CKDWORD bytes, CKBOOL streamed);
     void Cleanup();
+    void ResetMixMatrix();
     
     // Update track settings from current state
     void ApplySettings();

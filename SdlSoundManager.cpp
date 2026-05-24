@@ -218,10 +218,6 @@ SdlSoundSource::SdlSoundSource()
     m_Manager = NULL;
     m_TotalBytesPushed = 0;
     m_IsBound = FALSE;
-    m_LeftToLeftGain = 1.0f;
-    m_LeftToRightGain = 0.0f;
-    m_RightToLeftGain = 0.0f;
-    m_RightToRightGain = 1.0f;
     
     memset(&m_Format, 0, sizeof(CKWaveFormat));
     m_Format.wFormatTag = CKWAVE_FORMAT_PCM;
@@ -230,6 +226,7 @@ SdlSoundSource::SdlSoundSource()
     m_Format.wBitsPerSample = 16;
     m_Format.nBlockAlign = 4;
     m_Format.nAvgBytesPerSec = SDL_DEFAULT_SAMPLE_RATE * 4;
+    ResetMixMatrix();
 }
 
 SdlSoundSource::~SdlSoundSource()
@@ -244,10 +241,7 @@ void SdlSoundSource::Reset()
     m_IsPlaying = FALSE;
     m_IsPaused = FALSE;
     m_TotalBytesPushed = 0;
-    m_LeftToLeftGain = 1.0f;
-    m_LeftToRightGain = 0.0f;
-    m_RightToLeftGain = 0.0f;
-    m_RightToRightGain = 1.0f;
+    ResetMixMatrix();
     
     if (m_Buffer && m_BufferSize > 0) {
         memset(m_Buffer, 0, m_BufferSize);
@@ -270,10 +264,7 @@ CKBOOL SdlSoundSource::Initialize(SdlSoundManager *manager, CK_WAVESOUND_TYPE ty
     memcpy(&m_Format, wf, sizeof(CKWaveFormat));
     m_TotalBytesPushed = 0;
     m_IsBound = FALSE;
-    m_LeftToLeftGain = 1.0f;
-    m_LeftToRightGain = 0.0f;
-    m_RightToLeftGain = 0.0f;
-    m_RightToRightGain = 1.0f;
+    ResetMixMatrix();
     
     // Allocate ring buffer
     m_BufferSize = bytes;
@@ -327,10 +318,20 @@ void SdlSoundSource::Cleanup()
     m_BufferSize = 0;
     m_Manager = NULL;
     m_TotalBytesPushed = 0;
+    ResetMixMatrix();
+}
+
+void SdlSoundSource::ResetMixMatrix()
+{
     m_LeftToLeftGain = 1.0f;
-    m_LeftToRightGain = 0.0f;
     m_RightToLeftGain = 0.0f;
-    m_RightToRightGain = 1.0f;
+    if (m_Format.nChannels == 1) {
+        m_LeftToRightGain = 1.0f;
+        m_RightToRightGain = 0.0f;
+    } else {
+        m_LeftToRightGain = 0.0f;
+        m_RightToRightGain = 1.0f;
+    }
 }
 
 void SdlSoundSource::QueueAudioData(const void *data, CKDWORD bytes)
@@ -1131,6 +1132,7 @@ CKERROR SdlSoundManager::SetWaveFormat(void *source, CKWaveFormat &wf)
     
     sdlSource = (SdlSoundSource*)source;
     memcpy(&sdlSource->m_Format, &wf, sizeof(CKWaveFormat));
+    sdlSource->ResetMixMatrix();
     
     // Update stream format
     if (sdlSource->m_Stream) {
@@ -1143,6 +1145,9 @@ CKERROR SdlSoundManager::SetWaveFormat(void *source, CKWaveFormat &wf)
         }
         SDL_SetAudioStreamFormat(sdlSource->m_Stream, &streamSpec, NULL);
     }
+
+    sdlSource->ApplySettings();
+    sdlSource->Apply3DSettings(m_ListenerSettings);
     
     return CK_OK;
 }
