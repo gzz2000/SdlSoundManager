@@ -115,6 +115,25 @@ static void ComputeStereoVirtualPans(const VxVector &direction, float &leftPan, 
     rightPan = ClampFloat(x * cos30 + z * sin30, -1.0f, 1.0f);
 }
 
+static void NormalizeStereoMixMatrix(float &leftToLeft, float &leftToRight,
+                                     float &rightToLeft, float &rightToRight)
+{
+    float leftOutGain = leftToLeft + rightToLeft;
+    float rightOutGain = leftToRight + rightToRight;
+    float maxOutGain = leftOutGain;
+
+    if (rightOutGain > maxOutGain) {
+        maxOutGain = rightOutGain;
+    }
+    if (maxOutGain > 1.0f) {
+        float scale = 1.0f / maxOutGain;
+        leftToLeft *= scale;
+        leftToRight *= scale;
+        rightToLeft *= scale;
+        rightToRight *= scale;
+    }
+}
+
 CKERROR CreateSdlSoundManager(CKContext *context)
 {
     if (!context) return CKERR_INVALIDPARAMETER;
@@ -719,6 +738,8 @@ void SdlSoundSource::Apply3DSettings(const CKListenerSettings &listener)
         m_LeftToRightGain = leftChannelRightGain;
         m_RightToLeftGain = rightChannelLeftGain;
         m_RightToRightGain = rightChannelRightGain;
+        NormalizeStereoMixMatrix(m_LeftToLeftGain, m_LeftToRightGain,
+                                 m_RightToLeftGain, m_RightToRightGain);
     }
     if (MixMatrixChanged(oldLL, oldLR, oldRL, oldRR,
                          m_LeftToLeftGain, m_LeftToRightGain,
