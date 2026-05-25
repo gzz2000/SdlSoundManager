@@ -24,6 +24,8 @@
 
 #define SDL_SOUND_PI        3.14159265358979323846f
 #define SDL_SOUND_SPEED     343.3f
+#define SDL_SOUND_MIN_DOPPLER_RATIO 0.125f
+#define SDL_SOUND_MAX_DOPPLER_RATIO 8.0f
 
 //-----------------------------------------------------------------------------
 // Plugin Entry Points
@@ -882,7 +884,7 @@ void SdlSoundSource::Apply3DSettings(const CKListenerSettings &listener)
         denom = speed - sourceToward * listener.m_DopplerFactor;
         if (denom < speed * 0.1f) denom = speed * 0.1f;
         if (numer < speed * 0.1f) numer = speed * 0.1f;
-        doppler = ClampFloat(numer / denom, 0.5f, 2.0f);
+        doppler = ClampFloat(numer / denom, SDL_SOUND_MIN_DOPPLER_RATIO, SDL_SOUND_MAX_DOPPLER_RATIO);
     }
 
     pitch = m_Settings.m_Pitch * doppler;
