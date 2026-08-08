@@ -97,6 +97,7 @@ set(SDLSOUND_SOURCES
 )
 
 function(sdlsound_configure_target TARGET_NAME)
+    target_compile_features(${TARGET_NAME} PRIVATE cxx_std_17)
     target_include_directories(${TARGET_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
     set(_ck2_dep CK2)
     set(_vxmath_dep VxMath)
