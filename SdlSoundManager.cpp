@@ -324,6 +324,7 @@ SdlSoundSource::~SdlSoundSource()
 
 void SdlSoundSource::Reset()
 {
+    m_SimulationFrame = 0.0;
     m_WritePos = 0;
     m_PlayPos = 0;
     m_IsPlaying = FALSE;
@@ -347,6 +348,7 @@ CKBOOL SdlSoundSource::Initialize(SdlSoundManager *manager, CK_WAVESOUND_TYPE ty
     Cleanup();
     
     m_Manager = manager;
+    m_SimulationFrame = 0.0;
     m_Type = type;
     m_IsStreamed = streamed;
     memcpy(&m_Format, wf, sizeof(CKWaveFormat));
@@ -651,7 +653,8 @@ void SdlSoundSource::RefreshQueuedAudio()
 
     queued = (Uint64)queuedBytes;
     consumed = (m_TotalBytesPushed > queued) ? (m_TotalBytesPushed - queued) : 0;
-    playPos = (CKDWORD)((m_PlayPos + consumed) % m_BufferSize);
+    playPos = (m_Manager && m_Manager->UsesSimulationClock())
+        ? SimulationBytePosition() : (CKDWORD)((m_PlayPos + consumed) % m_BufferSize);
 
     SDL_ClearAudioStream(m_Stream);
     ForgetQueuedMixMatrix();
@@ -680,7 +683,7 @@ void SdlSoundSource::ApplySettings()
 
     pitch = m_Settings.m_Pitch;
     if (pitch <= 0.0f) pitch = 1.0f;
-    SDL_SetAudioStreamFrequencyRatio(m_Stream, pitch);
+    if (SDL_SetAudioStreamFrequencyRatio(m_Stream, pitch)) m_EffectivePitch = pitch;
 
     // Base gain; 3D attenuation (if any) is applied in Apply3DSettings.
     SDL_SetAudioStreamGain(m_Stream, m_Settings.m_Gain);
@@ -889,7 +892,7 @@ void SdlSoundSource::Apply3DSettings(const CKListenerSettings &listener)
 
     pitch = m_Settings.m_Pitch * doppler;
     if (pitch <= 0.0f) pitch = 1.0f;
-    SDL_SetAudioStreamFrequencyRatio(m_Stream, pitch);
+    if (SDL_SetAudioStreamFrequencyRatio(m_Stream, pitch)) m_EffectivePitch = pitch;
 
     // Apply attenuation via per-stream gain (global gain handled at device)
     SDL_SetAudioStreamGain(m_Stream, m_Settings.m_Gain * attenuation * coneGain);
@@ -1020,6 +1023,7 @@ void *SdlSoundManager::CreateSource(CK_WAVESOUND_TYPE type, CKWaveFormat *wf, CK
         return NULL;
     }
     
+    m_Sources.emplace(source, std::shared_ptr<SdlSoundSource>(source));
     return source;
 }
 
@@ -1054,6 +1058,7 @@ void *SdlSoundManager::DuplicateSource(void *source)
     newSource->ApplySettings();
     newSource->Apply3DSettings(m_ListenerSettings);
     
+    m_Sources.emplace(newSource, std::shared_ptr<SdlSoundSource>(newSource));
     return newSource;
 }
 
@@ -1064,7 +1069,8 @@ void SdlSoundManager::ReleaseSource(void *source)
     if (!ValidateSource(source)) return;
     
     sdlSource = (SdlSoundSource*)source;
-    delete sdlSource;
+    sdlSource->Silence();
+    m_Sources.erase(sdlSource);
 }
 
 //-----------------------------------------------------------------------------
@@ -1093,6 +1099,13 @@ void SdlSoundManager::InternalPlay(void *source, CKBOOL loop)
     
     sdlSource = (SdlSoundSource*)source;
     if (!ValidateMixer() || !sdlSource->m_Stream) return;
+
+    if (UsesSimulationClock() && !sdlSource->m_IsStreamed) {
+        if (!sdlSource->m_IsPlaying && !sdlSource->m_IsPaused &&
+            sdlSource->m_SimulationFrame * sdlSource->m_Format.nBlockAlign >= sdlSource->m_BufferSize)
+            sdlSource->m_SimulationFrame = 0.0;
+        sdlSource->m_PlayPos = sdlSource->SimulationBytePosition();
+    }
 
     if (!sdlSource->m_IsBound) {
         if (!SDL_BindAudioStream(m_Device, sdlSource->m_Stream)) {
@@ -1171,6 +1184,8 @@ void SdlSoundManager::SetPlayPosition(void *source, int pos)
     
     sdlSource = (SdlSoundSource*)source;
     sdlSource->m_PlayPos = (CKDWORD)pos;
+    sdlSource->m_SimulationFrame = sdlSource->m_Format.nBlockAlign
+        ? double(pos) / sdlSource->m_Format.nBlockAlign : 0.0;
 
     if (sdlSource->m_IsStreamed && sdlSource->m_Stream) {
         SDL_ClearAudioStream(sdlSource->m_Stream);
@@ -1211,6 +1226,9 @@ int SdlSoundManager::GetPlayPosition(void *source)
     
     sdlSource = (SdlSoundSource*)source;
 
+    if (UsesSimulationClock() && !sdlSource->m_IsStreamed)
+        return int(sdlSource->SimulationBytePosition());
+
     if (sdlSource->m_Stream) {
         queuedBytes = sdlSource->GetPendingSourceBytes();
         if (queuedBytes >= 0) {
@@ -1237,6 +1255,17 @@ CKBOOL SdlSoundManager::IsPlaying(void *source)
 
     if (!sdlSource->m_IsPlaying || sdlSource->m_IsPaused) {
         return FALSE;
+    }
+
+    if (UsesSimulationClock() && !sdlSource->m_IsStreamed) {
+        // Hardware may be ahead (slow motion) or behind (TAS fast-forward).
+        // It must never decide whether a behavior's End Playing output fires.
+        if (sdlSource->m_Stream && SDL_GetAudioStreamQueued(sdlSource->m_Stream) == 0 &&
+            SDL_GetAudioStreamAvailable(sdlSource->m_Stream) == 0) {
+            sdlSource->m_PlayPos = sdlSource->SimulationBytePosition();
+            sdlSource->RefreshQueuedAudio();
+        }
+        return TRUE;
     }
 
     if (!sdlSource->m_Stream) {
@@ -1279,6 +1308,7 @@ CKERROR SdlSoundManager::SetWaveFormat(void *source, CKWaveFormat &wf)
     if (!ValidateSource(source)) return CKERR_INVALIDPARAMETER;
     
     sdlSource = (SdlSoundSource*)source;
+    sdlSource->m_SimulationFrame = 0.0;
 
     if (sdlSource->m_Stream) {
         SDL_ClearAudioStream(sdlSource->m_Stream);
@@ -1804,6 +1834,7 @@ CKERROR SdlSoundManager::OnCKInit()
 
 CKERROR SdlSoundManager::OnCKEnd()
 {
+    ++m_SnapshotEpoch;
     if (m_Context->GetStartOptions() & CK_CONFIG_DISABLEDSOUND) {
         return CK_OK;
     }
@@ -1985,6 +2016,7 @@ CKERROR SdlSoundManager::PostProcess()
 
 CKERROR SdlSoundManager::OnCKReset()
 {
+    ++m_SnapshotEpoch;
     CK_ID *it;
     CKWaveSound *ws;
     
@@ -2094,8 +2126,13 @@ CKERROR SdlSoundManager::SequenceToBeDeleted(CK_ID *objids, int count)
     
     if (!objids || count <= 0) return CKERR_INVALIDPARAMETER;
 
-    // Call base class implementation
-    result = CKSoundManager::SequenceDeleted(objids, count);
+    // The base SequenceDeleted calls virtual PostClearAll. Dispatching that
+    // here invokes our *whole-context* audio reset for every deleted parameter
+    // or temporary object, losing active fades and all minions. Only validate
+    // the base listener here; leave unrelated audio intact.
+    result = CKSoundManager::PostClearAll();
+    for (int i = 0; i < count; ++i)
+        if (objids[i] == m_ListenerEntity) m_ListenerEntity = 0;
 
     // Stop and remove sounds that are being deleted
     for (it = m_SoundsPlaying.Begin(); it != m_SoundsPlaying.End();) {
@@ -2118,6 +2155,7 @@ CKERROR SdlSoundManager::SequenceToBeDeleted(CK_ID *objids, int count)
         ws = (CKWaveSound*)m_Context->GetObject((*itm)->m_OriginalSound);
         if (ws && ws->IsToBeDeleted()) {
             (*itm)->m_OriginalSound = 0;
+            (*itm)->m_OriginalSource = nullptr;
         }
 
         // Check if attached entity is being deleted
@@ -2128,4 +2166,10 @@ CKERROR SdlSoundManager::SequenceToBeDeleted(CK_ID *objids, int count)
     }
 
     return result;
+}
+
+CKERROR SdlSoundManager::SequenceDeleted(CK_ID *, int) {
+    // CKSoundManager's default implementation dispatches virtual PostClearAll;
+    // ordinary object deletion is not a whole-context reset.
+    return CKSoundManager::PostClearAll();
 }

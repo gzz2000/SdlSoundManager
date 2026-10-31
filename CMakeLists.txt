@@ -93,6 +93,8 @@ endif ()
 
 set(SDLSOUND_SOURCES
         SdlSoundManager.cpp
+        SdlSoundTimeline.cpp
+        SdlSoundSnapshot.cpp
         SdlSoundManager.h
 )
 
@@ -156,4 +158,13 @@ if (SDLSOUND_IS_TOP_LEVEL)
     message(STATUS "  Install Prefix:       ${CMAKE_INSTALL_PREFIX}")
     message(STATUS "============================================================")
     message(STATUS "")
+endif ()
+
+option(SDLSOUND_BUILD_TESTS "Build sound timeline/snapshot regression" OFF)
+if (SDLSOUND_BUILD_TESTS AND TARGET SdlSoundManager)
+    enable_testing()
+    add_executable(SoundSnapshotRegression tests/SoundSnapshotRegression.cpp)
+    target_include_directories(SoundSnapshotRegression PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_link_libraries(SoundSnapshotRegression PRIVATE SdlSoundManager CK2 VxMath SDL3::SDL3)
+    add_test(NAME SoundSnapshotRegression COMMAND SoundSnapshotRegression)
 endif ()

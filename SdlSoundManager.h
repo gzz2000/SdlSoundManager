@@ -4,6 +4,11 @@
 #include "CKAll.h"
 
 #include <SDL3/SDL.h>
+#include <map>
+#include <memory>
+
+struct SdlSoundSnapshot;
+struct SdlSoundRestore;
 
 // Constants for better maintainability
 #define SDL_DEFAULT_SAMPLE_RATE     22050
@@ -22,6 +27,8 @@ struct SdlSoundSource;
 class SdlSoundManager : public CKSoundManager
 {
     friend class CKWaveSound;
+    friend struct SdlSoundSnapshot;
+    friend struct SdlSoundRestore;
 
 public:
     // Constructor/Destructor
@@ -80,8 +87,10 @@ public:
     virtual CKERROR OnCKPlay();
     virtual CKERROR PostClearAll();
     virtual CKERROR PostProcess();
+    virtual CKERROR PreProcess();
     virtual CKERROR PreLaunchScene(CKScene *OldScene, CKScene *NewScene);
     virtual CKERROR SequenceToBeDeleted(CK_ID *objids, int count);
+    virtual CKERROR SequenceDeleted(CK_ID *objids, int count);
 
     // Status
     virtual CKBOOL IsInitialized();
@@ -97,6 +106,7 @@ public:
                CKMANAGER_FUNC_OnCKReset |
                CKMANAGER_FUNC_OnCKPause |
                CKMANAGER_FUNC_PostProcess |
+               CKMANAGER_FUNC_PreProcess |
                CKMANAGER_FUNC_OnSequenceToBeDeleted |
                CKMANAGER_FUNC_PreLaunchScene;
     }
@@ -128,6 +138,7 @@ protected:
 public:
     // Made public for SdlSoundSource access
     static SDL_AudioFormat CKFormatToSDL(const CKWaveFormat &wf);
+    bool UsesSimulationClock() const;
 
     // Grant SdlSoundSource access to private members
     friend struct SdlSoundSource;
@@ -152,6 +163,12 @@ private:
     
     // Thread safety
     SDL_Mutex *m_Mutex;
+
+    // A checkpoint can retain a released source's identity. Releasing it stops
+    // playback immediately, but its address is not recycled while saved handles
+    // still refer to it. Backend streams are never serialized as raw pointers.
+    std::map<SdlSoundSource *, std::shared_ptr<SdlSoundSource>> m_Sources;
+    unsigned long long m_SnapshotEpoch = 1;
     
     // Helper methods for thread safety
     void LockMutex() const;
@@ -190,6 +207,8 @@ struct SdlSoundSource
     // Buffer positions
     CKDWORD m_WritePos;
     CKDWORD m_PlayPos;
+    double m_SimulationFrame = 0.0;
+    float m_EffectivePitch = 1.0f;
     
     // Wave format
     CKWaveFormat m_Format;
@@ -240,7 +259,19 @@ struct SdlSoundSource
     void ForgetQueuedMixMatrix();
     void RememberQueuedMixMatrix();
     CKBOOL QueuedMixMatrixChanged() const;
+    void AdvanceSimulation(float milliseconds);
+    CKDWORD SimulationBytePosition() const;
+    void Silence();
+    void Swap(SdlSoundSource &other);
 };
+
+extern "C" {
+DLL_EXPORT int SDL_SoundCaptureSnapshot(CKContext *, void **);
+DLL_EXPORT int SDL_SoundPrepareRestore(CKContext *, void *, void **);
+DLL_EXPORT int SDL_SoundCommitRestore(CKContext *, void *);
+DLL_EXPORT void SDL_SoundDestroySnapshot(void *);
+DLL_EXPORT void SDL_SoundDestroyRestore(void *);
+}
 
 // Factory function
 CKERROR CreateSdlSoundManager(CKContext *context);
